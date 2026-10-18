@@ -12,7 +12,7 @@
 
 模型：deepseek v4.1 flash - 1017
 
-agent工具(个人产品，打个广告)：wenzflow
+agent工具(个人产品，打个广告)：\[wenzflow\](https://wenzflow.com)
 
 ## 视频介绍
 
