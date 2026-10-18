@@ -8,6 +8,10 @@
 
 使用funasr、whisper模型实现语音识别、断句，然后用electron框架显示识别内容字幕到屏幕上。
 
+## 视频介绍
+
+- [https://www.bilibili.com/video/BV1aBJz6EEtE](https://www.bilibili.com/video/BV1aBJz6EEtE)
+
 ## 功能列表
 
 - [x] 实时字幕
