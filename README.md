@@ -25,3 +25,9 @@
 ## 界面截图
 
 ![Pasted image](assets/pasted-image-1792299695047121.png "Pasted image")
+
+## 反馈交流
+
+AI交流群(QQ)：1102616387
+
+WenzFlow交流群(QQ)：482342865
