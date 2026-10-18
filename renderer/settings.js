@@ -7,6 +7,8 @@ let syncing = false
 let saveTimer = null
 let pending = {}
 let audioDevices = []
+// 扬声器（电脑声音输出）端点；采集模式为 output 时用它
+let audioOutputDevices = []
 let installLines = []
 let lastRecordingPath = null
 let recording = false
@@ -42,7 +44,14 @@ const ASR_FIELDS = {
   asrUsePunc: 'usePunc',
   whisperModel: 'whisperModel',
   computeType: 'computeType',
-  language: 'language'
+  language: 'language',
+  // 接口（云端 API）模式
+  apiBaseUrl: 'apiBaseUrl',
+  apiKey: 'apiKey',
+  apiModel: 'apiModel',
+  apiLanguage: 'apiLanguage',
+  apiPrompt: 'apiPrompt',
+  apiTimeout: 'apiTimeout'
 }
 
 const STATE_TEXT = {
@@ -62,11 +71,26 @@ function applyCapabilities (status) {
   const note = $('engineNote')
 
   if (!status.packaged) {
-    note.textContent = '源码模式：FunASR 和 Whisper 都可以用。'
+    note.textContent = '源码模式：FunASR、Whisper 两个本地引擎，以及接口（云端 API）都可以用。'
     return
   }
 
-  note.textContent = '安装版内置 FunASR 和 Whisper 两个引擎，首次使用需要下载对应模型。'
+  note.textContent = '安装版内置 FunASR 和 Whisper 两个本地引擎（首次使用需要下载对应模型）；也可以选「接口（云端 API）」，本地只做采集，不下载模型。'
+}
+
+/** 引擎切换时的补充说明：接口模式不需要本地模型与推理设备 */
+function renderEngineHint (engine) {
+  const api = engine === 'api'
+
+  const installHint = $('installHint')
+  if (installHint) {
+    installHint.textContent = api
+      ? '接口模式不用下载模型：填好接口地址、密钥和模型名后，直接点「开始识别」即可；改完配置点「重新加载模型」生效。'
+      : '首次使用先点「一键安装」补齐依赖并下载模型；改完配置后点「重新加载模型」生效。'
+  }
+
+  const installBtn = $('btnInstall')
+  if (installBtn) installBtn.textContent = api ? '校验接口配置' : '一键安装 / 下载模型'
 }
 
 /* ---------------- 数值映射 ---------------- */
@@ -173,6 +197,18 @@ function fill (c) {
   $('computeType').value = c.asr.computeType || 'int8'
   $('language').value = c.asr.language || 'zh'
 
+  $('apiBaseUrl').value = c.asr.apiBaseUrl || ''
+  $('apiKey').value = c.asr.apiKey || ''
+  $('apiModel').value = c.asr.apiModel || 'whisper-1'
+  // 接口语言留空时跟随上面的「识别语言」
+  const apiLanguage = c.asr.apiLanguage || c.asr.language || 'zh'
+  $('apiLanguage').value = ['zh', 'en', 'auto'].includes(apiLanguage) ? apiLanguage : 'zh'
+  $('apiPrompt').value = c.asr.apiPrompt || ''
+  const apiTimeout = Number.isFinite(Number(c.asr.apiTimeout)) ? Number(c.asr.apiTimeout) : 30
+  $('apiTimeout').value = Math.min(120, Math.max(5, Math.round(apiTimeout)))
+  // 采集模式：input = 麦克风；output = 电脑声音输出（WASAPI 环回）
+  $('captureSource').value = c.asr.captureSource === 'output' ? 'output' : 'input'
+
   syncEngineBlocks()
   syncing = false
   updateOutputs()
@@ -192,6 +228,7 @@ function syncEngineBlocks () {
   for (const block of document.querySelectorAll('.engine-block')) {
     block.classList.toggle('active', block.dataset.engine === engine)
   }
+  renderEngineHint(engine)
 }
 
 /* ---------------- 显示器 ---------------- */
@@ -278,25 +315,64 @@ function renderDisplayInfo (list) {
     `当前字幕屏：${target.label}${target.primary ? '（主屏）' : ''} · 分辨率 ${target.width}×${target.height}${work} · 缩放 ${scale}%${rotate} · 起点 ${target.x},${target.y}`
 }
 
-/* ---------------- 麦克风 ---------------- */
+/* ---------------- 音频设备（麦克风 / 电脑声音输出） ---------------- */
+
+/** 当前采集模式：input = 麦克风；output = 电脑声音输出（WASAPI 环回） */
+function currentCaptureKind () {
+  return cfg && cfg.asr && cfg.asr.captureSource === 'output' ? 'output' : 'input'
+}
+
+/** 采集模式对应的设备目录 */
+function currentDeviceCatalog () {
+  return currentCaptureKind() === 'output' ? audioOutputDevices : audioDevices
+}
+
+/** 采集模式相关的标签、提示与可用性 */
+function renderCaptureMode (busy) {
+  const output = currentCaptureKind() === 'output'
+  const captured = typeof busy === 'boolean' ? busy : (recording || micTesting)
+
+  const label = $('audioDeviceLabel')
+  if (label) label.textContent = output ? '扬声器' : '麦克风'
+
+  const hint = $('captureSourceHint')
+  if (hint) {
+    hint.textContent = output
+      ? '电脑声音输出：采集所选扬声器正在播放的声音（游戏、播放器、会议等），与麦克风无关。'
+      : '麦克风：采集你说话的语音。'
+  }
+
+  // 录制/测试进行中不允许换来源，避免中途换设备
+  const select = $('captureSource')
+  if (select) select.disabled = captured
+
+  const recordBtn = $('btnRecordTest')
+  if (recordBtn) {
+    recordBtn.title = output
+      ? (engineRunning ? '请先停止实时识别，再录制电脑声音' : '录制所选扬声器正在播放的声音')
+      : (engineRunning ? '请先停止实时识别，再录制测试音频' : '')
+  }
+}
 
 function renderAudioDevices () {
   if (!cfg) return
 
+  const output = currentCaptureKind() === 'output'
+  const catalog = output ? audioOutputDevices : audioDevices
+  const current = output ? cfg.asr.audioOutputDevice : cfg.asr.audioDevice
   const select = $('audioDevice')
-  const current = cfg.asr.audioDevice
 
   syncing = true
   select.innerHTML = ''
 
   // 「系统默认」直接把实际设备名带上，省得用户猜默认到底是哪一个
-  const defaultDev = audioDevices.find((d) => d.default)
+  const defaultDev = catalog.find((d) => d.default)
   const defaultOpt = document.createElement('option')
   defaultOpt.value = 'default'
   defaultOpt.textContent = defaultDev ? `系统默认（${defaultDev.name}）` : '系统默认'
   select.appendChild(defaultOpt)
 
-  for (const d of audioDevices) {
+  for (const d of catalog) {
     const opt = document.createElement('option')
     opt.value = d.id
     opt.textContent = d.name
@@ -304,19 +380,29 @@ function renderAudioDevices () {
     select.appendChild(opt)
   }
 
-  if (current != null && !audioDevices.some(d => d.id === current)) {
+  if (current != null && !catalog.some(d => d.id === current)) {
     const missing = document.createElement('option')
     missing.value = current
-    missing.textContent = '已保存的麦克风不可用，请刷新或重新选择'
+    missing.textContent = output
+      ? '已保存的扬声器不可用，请刷新或重新选择'
+      : '已保存的麦克风不可用，请刷新或重新选择'
     missing.disabled = true
     select.appendChild(missing)
   }
   select.value = current == null ? 'default' : current
   syncing = false
 
-  $('audioHint').textContent = audioDevices.length
-    ? `检测到 ${audioDevices.length} 个原生麦克风${cfg.asr.audioDeviceMigrated ? ' · 旧设备编号已重置为系统默认，请确认麦克风选择' : ''}`
-    : '未检测到原生麦克风，请检查设备、系统权限和原生采集组件'
+  renderCaptureMode()
+
+  if (!catalog.length) {
+    $('audioHint').textContent = output
+      ? '未检测到扬声器，请检查系统是否已连接输出设备'
+      : '未检测到原生麦克风，请检查设备、系统权限和原生采集组件'
+    return
+  }
+  $('audioHint').textContent = output
+    ? `检测到 ${catalog.length} 个扬声器（电脑声音输出）${cfg.asr.audioOutputDeviceMigrated ? ' · 已保存的扬声器不可用，请重新选择' : ''}`
+    : `检测到 ${catalog.length} 个原生麦克风${cfg.asr.audioDeviceMigrated ? ' · 旧设备编号已重置为系统默认，请确认麦克风选择' : ''}`
 }
 
 /* ---------------- 保存 ---------------- */
@@ -344,7 +430,8 @@ function scheduleSave (patch) {
 function syncAudioControls () {
   $('btnRecordTest').disabled = recordStarting || recordStopping || micTesting || recognizing || engineRunning
   $('btnRecordTest').textContent = recordStarting ? '正在启动…' : recordStopping ? '正在停止…' : recording ? '停止录制' : '录制 5 秒'
-  $('btnRecordTest').title = engineRunning ? '请先停止实时识别，再录制测试音频' : ''
+  // 采集模式决定按钮提示（麦克风 / 电脑声音），统一由 renderCaptureMode 维护
+  renderCaptureMode()
   $('audioDevice').disabled = recording || micTesting
   $('btnRefreshDevices').disabled = recording || micTesting
   $('btnPlayRecording').disabled = recording || micTesting || recognizing || !lastRecordingPath
@@ -591,12 +678,32 @@ function bindAll () {
     }
   })
 
-  /* ---- 麦克风 ---- */
+  /* ---- 采集模式与设备 ---- */
+
+  // 切换麦克风 / 电脑声音输出：两种来源各存各自的设备，切换后重新渲染列表
+  $('captureSource').addEventListener('change', () => {
+    if (syncing) return
+    const captureSource = $('captureSource').value === 'output' ? 'output' : 'input'
+    cfg.asr.captureSource = captureSource
+    renderAudioDevices()
+    renderCaptureMode()
+    scheduleSave({ asr: { captureSource } })
+  })
 
   $('audioDevice').addEventListener('change', () => {
     if (syncing) return
     const v = $('audioDevice').value
-    scheduleSave({ asr: { audioDevice: v === 'default' ? null : v } })
+    const device = v === 'default' ? null : v
+    // 采集模式不同，保存到不同字段，互不覆盖
+    if (currentCaptureKind() === 'output') {
+      cfg.asr.audioOutputDevice = device
+      cfg.asr.audioOutputDeviceMigrated = false
+      scheduleSave({ asr: { audioOutputDevice: device } })
+    } else {
+      cfg.asr.audioDevice = device
+      cfg.asr.audioDeviceMigrated = false
+      scheduleSave({ asr: { audioDevice: device } })
+    }
   })
 
   $('btnRefreshDevices').addEventListener('click', () => {
@@ -619,9 +726,12 @@ function bindAll () {
     }
     if (micTesting || recognizing || engineRunning) return
     stopRecordingPlayback()
+    const fromOutput = currentCaptureKind() === 'output'
     const box = $('recordResult')
     box.className = 'rec-box show'
-    box.textContent = '正在准备录音，请稍候…（显示「正在录制」后再说话）'
+    box.textContent = fromOutput
+      ? '正在准备录制电脑声音，请稍候…（显示「正在录制」后播放声音）'
+      : '正在准备录音，请稍候…（显示「正在录制」后再说话）'
     diagnosticsHydrated = true
     recording = true
     recordStarting = true
@@ -630,9 +740,9 @@ function bindAll () {
     $('recordMeter').classList.add('show')
     $('recordMeterFill').style.width = '2%'
     $('recordMeterFill').style.background = '#475569'
-    $('recordMeterText').textContent = '正在打开麦克风…'
+    $('recordMeterText').textContent = fromOutput ? '正在打开扬声器…' : '正在打开麦克风…'
     try {
-      // 等设备选择保存完成，避免刚切换麦克风就录到旧设备。
+      // 等设备选择保存完成，避免刚切换设备就录到旧设备。
       await flushSave()
       if (!await window.settingsAPI.testRecord(5)) throw new Error('无法启动录音，请重试')
       recordStarting = false
@@ -691,7 +801,13 @@ function bindAll () {
     const el = $(id)
     el.addEventListener('change', () => {
       if (syncing) return
-      const value = el.type === 'checkbox' ? el.checked : el.value
+      let value = el.type === 'checkbox' ? el.checked : el.value
+      // 接口超时必须是数字：按 5~120 秒收敛，和配置层保持同一范围
+      if (key === 'apiTimeout') {
+        const n = Number(value)
+        value = Number.isFinite(n) ? Math.min(120, Math.max(5, Math.round(n))) : 30
+        el.value = value
+      }
       scheduleSave({ asr: { [key]: value } })
     })
   }
@@ -826,6 +942,12 @@ window.settingsAPI.onAudioDevices((list) => {
   renderAudioDevices()
 })
 
+// 扬声器（电脑声音输出）端点：采集模式为 output 时使用
+window.settingsAPI.onAudioOutputDevices((list) => {
+  audioOutputDevices = Array.isArray(list) ? list : []
+  renderAudioDevices()
+})
+
 // 兼容主进程中尚未结束的诊断任务，完成后只解除录音互斥，不再展示独立测试入口。
 window.settingsAPI.onMicTest(() => {
   micTesting = false
@@ -850,9 +972,13 @@ window.settingsAPI.onRecordResult((r) => {
 
   box.innerHTML = ''
 
+  const fromOutput = r.captureSource === 'output'
+  const source = fromOutput
+    ? 'Windows 原生 / WASAPI 环回（电脑声音）'
+    : 'Windows 原生 / Media Foundation'
+
   const meta = document.createElement('div')
   meta.className = 'muted'
-  const source = 'Windows 原生 / Media Foundation'
   meta.textContent = `已录制 ${r.duration}s · ${r.sampleRate}Hz · ${r.channels || 1} 声道 · 峰值 ${r.peak} · ${source}${r.deviceName ? ` · ${r.deviceName}` : ''}`
   box.appendChild(meta)
 
@@ -861,7 +987,9 @@ window.settingsAPI.onRecordResult((r) => {
   hint.className = hasSignal ? 'ok' : 'bad'
   hint.textContent = hasSignal
     ? '已采集到声音，可播放试听或识别录音'
-    : '峰值很低，这段录音基本是静音，先检查麦克风'
+    : (fromOutput
+        ? '峰值很低，这段录音基本是静音，先确认系统正在播放声音'
+        : '峰值很低，这段录音基本是静音，先检查麦克风')
   box.appendChild(hint)
 
   if (r.discontinuities > 0 || r.streamTicks > 0) {
@@ -879,14 +1007,18 @@ window.settingsAPI.onRecordResult((r) => {
   if (r.clipped && r.clipped > 0.1) {
     const clip = document.createElement('div')
     clip.className = 'bad'
-    clip.textContent = `⚠ 有 ${r.clipped}% 的样本削顶，声音可能失真（麦克风电平偏高）`
+    clip.textContent = fromOutput
+      ? `⚠ 有 ${r.clipped}% 的样本削顶，声音可能失真（播放音量偏高）`
+      : `⚠ 有 ${r.clipped}% 的样本削顶，声音可能失真（麦克风电平偏高）`
     box.appendChild(clip)
   }
 })
 
 window.settingsAPI.onRecordLevel((r) => {
   if (!r || !recording || recordStopping) return
-  $('recordResult').textContent = '正在录制，请对着麦克风说话…（再点一次可提前停止）'
+  $('recordResult').textContent = currentCaptureKind() === 'output'
+    ? '正在录制电脑声音，请让扬声器播放声音…（再点一次可提前停止）'
+    : '正在录制，请对着麦克风说话…（再点一次可提前停止）'
   const fill = $('recordMeterFill')
   const text = $('recordMeterText')
   if (!fill || !text) return

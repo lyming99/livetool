@@ -364,7 +364,7 @@ function openSettings () {
   settingsWin.webContents.on('did-finish-load', () => {
     if (!bridge) return
     bridge.send({ type: 'list_devices' })
-    bridge.send({ type: 'check_env', engine: loadConfig().asr.engine })
+    bridge.send({ type: 'check_env', engine: loadConfig().asr.engine, asr: loadConfig().asr })
   })
   settingsWin.on('closed', () => { settingsWin = null })
 }
@@ -419,6 +419,8 @@ function startBridge () {
         break
       case 'devices':
         broadcast('audio:devices', msg.inputs || [])
+        // 扬声器（电脑声音）端点单独广播：设置页按当前采集模式渲染对应列表
+        broadcast('audio:output-devices', msg.outputs || [])
         break
       case 'mic_test':
         micTestActive = false
@@ -482,7 +484,7 @@ function startBridge () {
   setTimeout(() => {
     if (!bridge) return
     bridge.send({ type: 'list_devices' })
-    bridge.send({ type: 'check_env', engine: loadConfig().asr.engine })
+    bridge.send({ type: 'check_env', engine: loadConfig().asr.engine, asr: loadConfig().asr })
   }, 400)
 
   if (USE_MOCK) {
@@ -734,7 +736,7 @@ function registerIpc () {
 
   ipcMain.handle('env:check', (_evt, engine) => {
     if (!bridge) startBridge()
-    if (bridge) bridge.send({ type: 'check_env', engine })
+    if (bridge) bridge.send({ type: 'check_env', engine, asr: loadConfig().asr })
     return true
   })
 

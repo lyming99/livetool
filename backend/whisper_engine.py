@@ -30,6 +30,16 @@ SILENCE_SECONDS = 0.6
 MAX_UTTERANCE = 12.0            # 单句最长，超过就强制定稿
 MIN_UTTERANCE = 0.4             # 短于这个长度的不转写
 
+# 采集来源对应的运行状态与故障文案（与 FunASR 引擎保持一致）
+CAPTURE_STATUS = {
+    "input": "Media Foundation · 16kHz PCM16 麦克风采集中",
+    "output": "WASAPI 环回 · 16kHz PCM16 电脑声音采集中",
+}
+CAPTURE_INTERRUPTED = {
+    "input": "原生麦克风采集中断：",
+    "output": "电脑声音采集中断：",
+}
+
 
 class WhisperEngine:
     def __init__(self, config: dict | None = None, models_dir: str = "") -> None:
@@ -37,7 +47,12 @@ class WhisperEngine:
         self.model_size = (cfg.get("whisperModel") or "small").strip()
         self.compute_type = (cfg.get("computeType") or "int8").strip()
         self.infer_device = (cfg.get("device") or "cpu").strip()
-        self.audio_device = cfg.get("audioDevice")
+        # 采集来源：input = 麦克风，output = 电脑声音（WASAPI 环回）
+        from audio_devices import capture_target
+        target = capture_target(cfg)
+        self.capture_kind = target["kind"]
+        self.audio_device = target["device"]
+        self.capture_label = target["label"]
         self.cache_root = (cfg.get("cacheDir") or "").strip() or models_dir
         self.language = (cfg.get("language") or "zh").strip()
 
@@ -107,11 +122,12 @@ class WhisperEngine:
     def _read_loop(self, on_status) -> None:
         from mf_stream import PcmInputStream
 
-        stream = PcmInputStream(self.audio_device, sample_rate=SAMPLE_RATE, stop_event=self._stop)
+        stream = PcmInputStream(self.audio_device, kind=self.capture_kind,
+                                sample_rate=SAMPLE_RATE, stop_event=self._stop)
         self._capture = stream
         try:
             stream.start()
-            on_status("running", "Media Foundation · 16kHz PCM16 麦克风采集中")
+            on_status("running", CAPTURE_STATUS[self.capture_kind])
             while not self._stop.is_set():
                 audio = stream.read(BLOCK_SAMPLES)
                 if not audio.size:
@@ -127,7 +143,7 @@ class WhisperEngine:
                         pass
         except Exception as exc:
             if not self._stop.is_set():
-                on_status("error", f"原生麦克风采集中断：{exc}")
+                on_status("error", f"{CAPTURE_INTERRUPTED[self.capture_kind]}{exc}")
             self._stop.set()
         finally:
             stream.close()

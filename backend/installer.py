@@ -36,6 +36,14 @@ ENGINES = {
         ],
         "install": ["faster-whisper"],
     },
+    # 接口（云端 API）不需要本地模型：音频在本地采集，只把音频段发给接口转写。
+    # deps 留空，环境检查改为校验接口地址是否填写（见 check_env）。
+    "api": {
+        "label": "接口（云端 API）",
+        "deps": [],
+        "install": [],
+        "remote": True,
+    },
 }
 
 # 国内访问 HuggingFace 经常超时，未显式配置时走镜像。
@@ -43,10 +51,51 @@ ENGINES = {
 HF_MIRROR = "https://hf-mirror.com"
 
 
-def check_env(engine: str) -> dict:
+def _check_api_env(config: dict, spec: dict) -> dict:
+    """接口引擎没有本地模型，只校验接口地址与原生采集组件。"""
+    deps = []
+
+    base = (config.get("apiBaseUrl") or "").strip()
+    model = (config.get("apiModel") or "").strip() or "whisper-1"
+    if not base:
+        deps.append({"module": "api", "package": "接口地址",
+                     "installed": False, "error": "请填写接口地址，例如 https://api.openai.com/v1"})
+    elif not (base.startswith("http://") or base.startswith("https://")):
+        deps.append({"module": "api", "package": "接口地址",
+                     "installed": False, "error": "接口地址需要以 http:// 或 https:// 开头"})
+    else:
+        deps.append({"module": "api", "package": "接口地址", "installed": True, "error": ""})
+
+    deps.append({"module": "api-model", "package": f"接口模型（{model}）",
+                 "installed": True, "error": ""})
+
+    key = (config.get("apiKey") or "").strip()
+    deps.append({"module": "api-key", "package": "接口密钥",
+                 "installed": True, "error": "" if key else "未填写密钥（仅当接口无需鉴权时可直接使用）"})
+
+    from mf_capture import helper_path
+    native_ready = helper_path().is_file()
+    deps.append({"module": "mediafoundation", "package": "Windows 原生采集组件",
+                 "installed": native_ready,
+                 "error": "" if native_ready else "请构建原生组件或重新安装新版"})
+
+    # 地址必须填且是 http(s)；密钥只做提示，部分自建接口不需要
+    valid_base = bool(base) and (base.startswith("http://") or base.startswith("https://"))
+    return {
+        "engine": "api",
+        "label": spec["label"],
+        "deps": deps,
+        "ready": valid_base and native_ready,
+    }
+
+
+def check_env(engine: str, config: dict | None = None) -> dict:
     spec = ENGINES.get(engine)
     if spec is None:
         return {"engine": engine, "deps": [], "ready": False, "error": "未知引擎"}
+
+    if engine == "api":
+        return _check_api_env(config or {}, spec)
 
     deps = []
     for module, package in spec["deps"]:
@@ -276,6 +325,21 @@ def run_install(engine: str, config: dict, models_dir: str, on_line) -> bool:
     if not helper_path().is_file():
         on_line("缺少 Windows 原生采集组件：源码请先执行 npm run build:audio，安装版请重新安装新版。")
         return False
+
+    # 接口引擎没有本地依赖和模型：只确认接口地址已填写，不做任何下载
+    if engine == "api":
+        base = (config.get("apiBaseUrl") or "").strip()
+        if not base:
+            on_line("请在「识别引擎 → 接口」里填写接口地址，例如 https://api.openai.com/v1")
+            return False
+        if not (base.startswith("http://") or base.startswith("https://")):
+            on_line("接口地址需要以 http:// 或 https:// 开头")
+            return False
+        on_line(f"接口模式无需下载模型：{base}")
+        on_line(f"使用模型：{((config.get('apiModel') or '').strip() or 'whisper-1')}")
+        if not (config.get("apiKey") or "").strip():
+            on_line("提示：未填写接口密钥，仅当接口不需要鉴权时才可直接使用")
+        return True
 
     # 先看还缺什么，已经装好的不重复装
     missing = []

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Continuous 16-bit PCM microphone stream through the same MF helper as WAV capture.
+"""Continuous 16-bit PCM stream through the same native helper as WAV capture.
 
+Two sources share one protocol: the microphone (Media Foundation capture
+endpoint) and the computer's sound output (WASAPI loopback of a speaker).
 stdout is binary PCM; stderr is a separate JSON control channel. Nothing is
 base64-encoded or written to a growing file for real-time subtitle recognition.
 """
@@ -13,11 +15,17 @@ import threading
 import time
 from mf_capture import CaptureError, helper_path, resolve_device, _options
 
+# Control-channel "backend" value the helper reports for each source kind.
+BACKENDS = {"input": "mediafoundation", "output": "wasapi-loopback"}
+
 
 class PcmInputStream:
-    def __init__(self, device=None, *, sample_rate=16000, stop_event=None,
+    def __init__(self, device=None, *, kind="input", sample_rate=16000, stop_event=None,
                  on_level=None, executable=None, popen_factory=None, queue_limit=512):
+        if kind not in BACKENDS:
+            raise CaptureError("未知的音频来源类型")
         self.device = device
+        self.kind = kind
         self.sample_rate = int(sample_rate)
         self.channels = 1
         self._cancel = stop_event or threading.Event()
@@ -50,6 +58,12 @@ class PcmInputStream:
                 self._proc.stdin.flush()
             except (OSError, ValueError):
                 pass
+
+    def _label(self) -> str:
+        return "麦克风" if self.kind == "input" else "电脑声音"
+
+    def _failure_label(self) -> str:
+        return "Windows 原生采集失败" if self.kind == "input" else "Windows 电脑声音采集失败"
 
     def _fail(self, message):
         with self._state_lock:
@@ -86,18 +100,19 @@ class PcmInputStream:
                 except (UnicodeError, ValueError):
                     self._fail("原生 PCM 控制协议无效")
                     continue
-                kind = item.get("type")
-                if kind == "ready":
+                message_type = item.get("type")
+                if message_type == "ready":
                     if (item.get("sampleRate") != self.sample_rate or item.get("channels") != 1 or
-                            item.get("bitsPerSample") != 16 or item.get("backend") != "mediafoundation"):
+                            item.get("bitsPerSample") != 16 or
+                            item.get("backend") != BACKENDS[self.kind]):
                         self._fail("原生 PCM 流格式不匹配")
                     else:
                         self._ready.set()
-                elif kind == "error":
-                    self._fail(item.get("detail") or "Windows 原生采集失败")
-                elif kind == "record_level" and self._on_level is not None:
+                elif message_type == "error":
+                    self._fail(item.get("detail") or self._failure_label())
+                elif message_type == "record_level" and self._on_level is not None:
                     self._on_level(item)
-                elif kind == "complete":
+                elif message_type == "complete":
                     self.stats = item
                 else:
                     self._messages.append(str(item))
@@ -107,7 +122,7 @@ class PcmInputStream:
         finally:
             self._controls_done.set()
             if not self._ready.is_set():
-                self._fail("原生组件未报告 PCM 流格式；请检查组件版本和麦克风权限")
+                self._fail(f"原生组件未报告 PCM 流格式；请检查组件版本和{self._label()}权限")
 
     def start(self):
         if self._closed or self._proc is not None:
@@ -117,13 +132,17 @@ class PcmInputStream:
         executable = self._executable or helper_path()
         if not executable.is_file():
             raise CaptureError("缺少 Windows 原生采集组件，请重新构建或安装新版")
-        self.device = resolve_device(self.device)
+        self.device = resolve_device(self.device, kind=self.kind)
         if self._cancel.is_set():
             raise CaptureError("原生采集已取消")
+        command = [str(executable), "--stream"]
+        if self.kind == "output":
+            command.append("--loopback")
+        command.extend(["--device", self.device["id"],
+                        "--rate", str(self.sample_rate), "--channels", "1"])
         try:
             self._proc = self._spawn(
-                [str(executable), "--stream", "--device", self.device["id"],
-                 "--rate", str(self.sample_rate), "--channels", "1"],
+                command,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 bufsize=0, **_options(),
             )
@@ -170,7 +189,7 @@ class PcmInputStream:
                         raise self._error
                     raise CaptureError("原生 PCM 流意外结束")
                 if time.monotonic() >= deadline:
-                    raise CaptureError("麦克风长时间未返回 PCM 数据")
+                    raise CaptureError(f"{self._label()}长时间未返回 PCM 数据")
                 continue
             self._pending.extend(data)
         if self._error is not None:

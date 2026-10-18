@@ -38,6 +38,20 @@ SILENCE_SECONDS = 0.7
 NO_SIGNAL_SECONDS = 3.0
 NO_SIGNAL_RMS = 0.001
 
+# 采集来源对应的运行状态文案
+CAPTURE_STATUS = {
+    "input": "Media Foundation · 16kHz PCM16 麦克风采集中",
+    "output": "WASAPI 环回 · 16kHz PCM16 电脑声音采集中",
+}
+CAPTURE_NO_SIGNAL = {
+    "input": "没有检测到麦克风声音，请检查设备选择或系统权限",
+    "output": "没有检测到电脑声音，请确认系统正在播放声音并检查扬声器选择",
+}
+CAPTURE_INTERRUPTED = {
+    "input": "原生麦克风采集中断：",
+    "output": "电脑声音采集中断：",
+}
+
 
 class FunAsrEngine:
     def __init__(self, config: dict | None = None, models_dir: str = "") -> None:
@@ -52,8 +66,12 @@ class FunAsrEngine:
         self.punc_model = (cfg.get("puncModel") or "ct-punc").strip()
         self.use_punc = cfg.get("usePunc", True) is not False
         self.device = (cfg.get("device") or "cpu").strip()
-        # 麦克风：None 为系统默认，否则为 Media Foundation endpoint ID
-        self.audio_device = cfg.get("audioDevice")
+        # 采集来源：input = 麦克风（MF endpoint），output = 电脑声音（WASAPI 环回）
+        from audio_devices import capture_target
+        target = capture_target(cfg)
+        self.capture_kind = target["kind"]
+        self.audio_device = target["device"]
+        self.capture_label = target["label"]
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -196,7 +214,8 @@ class FunAsrEngine:
         import numpy as np
         from mf_stream import PcmInputStream
 
-        stream = PcmInputStream(self.audio_device, sample_rate=SAMPLE_RATE, stop_event=self._stop)
+        stream = PcmInputStream(self.audio_device, kind=self.capture_kind,
+                                sample_rate=SAMPLE_RATE, stop_event=self._stop)
         self._capture = stream
         cache: dict = {}
         buffer = ""
@@ -210,7 +229,7 @@ class FunAsrEngine:
 
         try:
             stream.start()
-            on_status("running", "Media Foundation · 16kHz PCM16 麦克风采集中")
+            on_status("running", CAPTURE_STATUS[self.capture_kind])
             while not self._stop.is_set():
                 audio16 = stream.read(READ_FRAMES)
                 if not audio16.size:
@@ -250,7 +269,7 @@ class FunAsrEngine:
                             and elapsed >= NO_SIGNAL_SECONDS and peak_rms < NO_SIGNAL_RMS):
                         no_signal_reported = True
                         self._log(f"没有检测到输入信号，peak_rms={peak_rms:.5f}")
-                        on_status("running", "没有检测到麦克风声音，请检查设备选择或系统权限")
+                        on_status("running", CAPTURE_NO_SIGNAL[self.capture_kind])
 
                     if voiced and silent_seconds >= SILENCE_SECONDS and buffer:
                         try:
@@ -274,8 +293,8 @@ class FunAsrEngine:
         except Exception as exc:
             if not self._stop.is_set():
                 self._log(f"采集循环异常退出：{exc!r}")
-                on_status("error", f"原生麦克风采集中断：{exc}")
+                on_status("error", f"{CAPTURE_INTERRUPTED[self.capture_kind]}{exc}")
         finally:
             stream.close()
             self._capture = None
-            self._log("Media Foundation 麦克风已关闭")
+            self._log(f"{self.capture_label}采集已关闭")

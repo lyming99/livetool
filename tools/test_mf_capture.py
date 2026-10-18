@@ -152,7 +152,7 @@ class BackendMFRegression(unittest.TestCase):
 
     def fake_capture(self, output, seconds, name, stop, on_level, **kwargs):
         self.assertEqual(name["id"], "endpoint-1")
-        self.assertEqual(kwargs, {"sample_rate": 44100, "channels": 1})
+        self.assertEqual(kwargs, {"sample_rate": 44100, "channels": 1, "kind": "input"})
         frames = int(seconds * 44100)
         write_pcm(output, frames=frames)
         on_level({"type": "record_level", "level": 0.25, "elapsed": seconds, "duration": seconds})

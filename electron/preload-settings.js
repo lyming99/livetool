@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('settingsAPI', {
   previewText: (text) => ipcRenderer.invoke('overlay:preview', text),
   getAudioDevices: () => ipcRenderer.invoke('devices:list'),
   onAudioDevices: (cb) => ipcRenderer.on('audio:devices', (_e, list) => cb(list)),
+  onAudioOutputDevices: (cb) => ipcRenderer.on('audio:output-devices', (_e, list) => cb(list)),
   checkEnv: (engine) => ipcRenderer.invoke('env:check', engine),
   onEnvState: (cb) => ipcRenderer.on('env:state', (_e, state) => cb(state)),
   testMic: () => ipcRenderer.invoke('mic:test'),

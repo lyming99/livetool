@@ -71,10 +71,18 @@
       <section class="card">
         <h2>音频输入</h2>
         <div class="field">
-          <label for="audioDevice">麦克风</label>
+          <label for="captureSource">采集模式</label>
+          <select id="captureSource">
+            <option value="input">麦克风</option>
+            <option value="output">电脑声音输出</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="audioDevice" id="audioDeviceLabel">麦克风</label>
           <select id="audioDevice"></select>
           <button id="btnRefreshDevices" class="mini">刷新</button>
         </div>
+        <div class="hint-line" id="captureSourceHint">麦克风：采集你说话的语音。</div>
         <div class="row-actions">
           <button id="btnRecordTest" class="mini">录制 5 秒</button>
           <button id="btnRecognizeTest" class="mini" disabled>识别录音</button>
@@ -209,6 +217,7 @@
           <select id="asrEngine">
             <option value="funasr">FunASR（中文流式，推荐）</option>
             <option value="whisper">Whisper（本地多语种）</option>
+            <option value="api">接口（云端 API）</option>
           </select>
         </div>
 
@@ -260,6 +269,41 @@
           </div>
         </div>
 
+        <div class="engine-block" data-engine="api">
+          <div class="field">
+            <label for="apiBaseUrl">接口地址</label>
+            <input type="text" id="apiBaseUrl" placeholder="https://api.openai.com/v1" />
+          </div>
+          <div class="field">
+            <label for="apiKey">接口密钥</label>
+            <input type="password" id="apiKey" placeholder="sk-...（自建接口可留空）" />
+          </div>
+          <div class="field">
+            <label for="apiModel">接口模型</label>
+            <input type="text" id="apiModel" placeholder="whisper-1" />
+          </div>
+          <div class="field">
+            <label for="apiLanguage">接口语言</label>
+            <select id="apiLanguage">
+              <option value="zh">中文</option>
+              <option value="en">英文</option>
+              <option value="auto">自动检测</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="apiPrompt">提示词</label>
+            <input type="text" id="apiPrompt" placeholder="可选：专有名词，帮助识别" />
+          </div>
+          <div class="field">
+            <label for="apiTimeout">请求超时</label>
+            <input type="number" id="apiTimeout" min="5" max="120" step="1" />
+            <span class="unit">秒</span>
+          </div>
+          <div class="hint-line" id="apiHint">
+            本地只做音频采集，按句调用 OpenAI 兼容的 /audio/transcriptions 接口转写；音频不落盘，密钥保存在本机配置文件里。
+          </div>
+        </div>
+
         <div class="field">
           <label for="asrDevice">推理设备</label>
           <select id="asrDevice">
@@ -285,7 +329,7 @@
         </div>
 
         <pre class="install-log" id="installLog"></pre>
-        <div class="hint-line">首次使用先点「一键安装」补齐依赖并下载模型；改完配置后点「重新加载模型」生效。</div>
+        <div class="hint-line" id="installHint">首次使用先点「一键安装」补齐依赖并下载模型；改完配置后点「重新加载模型」生效。</div>
       </section>
 
     </main>

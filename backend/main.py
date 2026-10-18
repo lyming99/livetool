@@ -159,19 +159,27 @@ class Backend:
         if engine == "whisper":
             from whisper_engine import WhisperEngine
             return WhisperEngine(config=cfg, models_dir=_models_dir())
+        if engine == "api":
+            from api_engine import ApiEngine
+            return ApiEngine(config=cfg, models_dir=_models_dir())
         from asr_engine import FunAsrEngine
         return FunAsrEngine(config=cfg, models_dir=_models_dir())
 
     # ---- 设备与环境 ----
 
     def list_devices(self) -> None:
+        from audio_devices import list_input_devices, list_output_devices
         try:
-            from audio_devices import list_input_devices
             inputs = list_input_devices()
         except Exception as exc:
-            log("list devices failed:", repr(exc))
+            log("list input devices failed:", repr(exc))
             inputs = []
-        emit({"type": "devices", "inputs": inputs})
+        try:
+            outputs = list_output_devices()
+        except Exception as exc:
+            log("list output devices failed:", repr(exc))
+            outputs = []
+        emit({"type": "devices", "inputs": inputs, "outputs": outputs})
 
     def mic_test(self, config: dict | None = None) -> None:
         """采集 3 秒并回报峰值电平，用来判断麦克风到底有没有声音进来。"""
@@ -248,11 +256,12 @@ class Backend:
         cfg = dict(self.asr_config if config is None else config)
         result = {"type": "record_result", "ok": False, "detail": "录音意外中断"}
         try:
-            from audio_devices import resolve_input_device
+            from audio_devices import capture_target, resolve_device
             if not (0 < seconds <= 60):
                 raise ValueError("录音时长必须在 0 到 60 秒之间")
-            info = resolve_input_device(cfg.get("audioDevice"))
-            result = self._record_media_foundation(seconds, stop_evt, info)
+            target = capture_target(cfg)
+            info = resolve_device(target["device"], kind=target["kind"])
+            result = self._record_media_foundation(seconds, stop_evt, info, target["kind"])
         except Exception as exc:
             log(f"录音失败：{exc!r}")
             result = {"type": "record_result", "ok": False,
@@ -287,7 +296,8 @@ class Backend:
             raise
         return reference
 
-    def _record_media_foundation(self, seconds: float, stop_evt, info: dict) -> dict:
+    def _record_media_foundation(self, seconds: float, stop_evt, info: dict,
+                                 kind: str = "input") -> dict:
         import tempfile
         from mf_capture import capture_to_wave
 
@@ -295,19 +305,24 @@ class Backend:
         fd, temporary = tempfile.mkstemp(prefix="recording-mf-", suffix=".wav", dir=_data_dir())
         os.close(fd)
         try:
-            # Same PCM16 / 44.1kHz / mono source-reader format as wenzflow's voice-note recorder.
+            # Same PCM16 / 44.1kHz / mono format as wenzflow's voice-note recorder for
+            # microphones; the loopback path converts the render mix to the same contract.
             result = capture_to_wave(temporary, seconds, info, stop_evt, emit,
-                                     sample_rate=44100, channels=1)
+                                     sample_rate=44100, channels=1, kind=kind)
             reference = self._preserve_recording_reference()
             os.replace(temporary, wav_path)
         finally:
             if os.path.exists(temporary):
                 os.remove(temporary)
+        detail = ("Windows WASAPI 环回 · 电脑声音" if kind == "output"
+                  else "Windows Media Foundation 原生采集")
         result.update({"type": "record_result", "ok": True, "path": wav_path,
-                       "referencePath": reference, "detail": "Windows Media Foundation 原生采集"})
+                       "referencePath": reference, "detail": detail,
+                       "captureSource": kind})
         for key, digits in (("peak", 5), ("rms", 5), ("clipped", 2)):
             result[key] = round(result[key], digits)
-        log(f"Media Foundation 录音完成 {result['sampleRate']}Hz "
+        label = "电脑声音" if kind == "output" else "麦克风"
+        log(f"{label}录音完成 {result['sampleRate']}Hz "
             f"{result['channels']}ch 时长={result['duration']}s 峰值={result['peak']} "
             f"不连续={result.get('discontinuities', 0)}")
         return result
@@ -445,13 +460,19 @@ class Backend:
     def _do_mic_test(self, config=None) -> None:
         result = {"type": "mic_test", "ok": False, "peak": 0, "backend": "mediafoundation"}
         stop = self._mic_stop or threading.Event()
+        kind = "input"
         try:
             import numpy as np
+            from audio_devices import capture_target
             from mf_stream import PcmInputStream
             cfg = self.asr_config if config is None else config
+            target = capture_target(cfg)
+            kind = target["kind"]
+            result["backend"] = "mediafoundation" if kind == "input" else "wasapi-loopback"
+            result["captureSource"] = kind
             peak = rms = 0.0
             remaining = 3 * 16000
-            with PcmInputStream(cfg.get("audioDevice"), stop_event=stop) as stream:
+            with PcmInputStream(target["device"], kind=kind, stop_event=stop) as stream:
                 while remaining > 0 and not stop.is_set():
                     data = stream.read(min(1600, remaining))
                     if not data.size:
@@ -460,10 +481,11 @@ class Backend:
                     rms = max(rms, float(np.sqrt(np.mean(np.square(data)))))
                     remaining -= len(data)
             has_signal = rms > 0.001 and not stop.is_set()
+            label = "电脑声音（WASAPI 环回）" if kind == "output" else "麦克风（Media Foundation）"
             result.update({"ok": has_signal, "peak": round(peak, 5), "rms": round(rms, 5),
                            "detail": ("测试已取消" if stop.is_set() else
-                                      "检测到输入（Media Foundation · 16000Hz PCM16）" if has_signal else
-                                      "3 秒内没有检测到声音（Media Foundation · 16000Hz PCM16）")})
+                                      f"检测到输入（{label} · 16000Hz PCM16）" if has_signal else
+                                      f"3 秒内没有检测到声音（{label} · 16000Hz PCM16）")})
         except Exception as exc:
             result["detail"] = f"{type(exc).__name__}: {exc}"
         finally:
@@ -539,10 +561,11 @@ class Backend:
             "checks": checks,
         })
 
-    def check_env(self, engine: str) -> None:
+    def check_env(self, engine: str, config: dict | None = None) -> None:
         try:
             from installer import check_env
-            result = check_env(engine or "funasr")
+            cfg = self.asr_config if config is None else config
+            result = check_env(engine or "funasr", cfg)
         except Exception as exc:
             result = {"engine": engine, "deps": [], "ready": False, "error": str(exc)}
         emit({"type": "env", **result})
@@ -552,6 +575,9 @@ class Backend:
             if self._installing:
                 emit({"type": "install", "phase": "log", "message": "已有安装任务在进行中"})
                 return
+            if config:
+                # 记住当前配置，安装后的环境检查才能读到接口地址等信息
+                self.asr_config = dict(config)
             self._installing = True
         threading.Thread(target=self._do_install, args=(engine, config), daemon=True).start()
 
@@ -655,7 +681,7 @@ def stdin_loop(backend: Backend) -> None:
         elif kind == "stop_record":
             backend.stop_record()
         elif kind == "check_env":
-            backend.check_env(cmd.get("engine"))
+            backend.check_env(cmd.get("engine"), cmd.get("asr"))
         elif kind == "install":
             backend.install(cmd.get("engine"), cmd.get("asr"))
         elif kind == "stop":

@@ -165,7 +165,8 @@ class SubtitleRegression(unittest.TestCase):
         engine._asr = Model()
         with mock.patch("mf_stream.PcmInputStream", return_value=source) as factory:
             engine._run(partials.append, finals.append, lambda *args: states.append(args))
-        factory.assert_called_once_with("endpoint-native", sample_rate=16000, stop_event=engine._stop)
+        factory.assert_called_once_with("endpoint-native", kind="input", sample_rate=16000,
+                                        stop_event=engine._stop)
         self.assertEqual(finals, ["原生字幕"])
         self.assertTrue(all(call["input"].shape == (9600,) and call["input"].dtype == np.float32 for call in calls))
         self.assertTrue(any(call["is_final"] for call in calls))

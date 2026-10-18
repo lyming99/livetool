@@ -39,8 +39,9 @@ function rendererFixture () {
     setConfig: async () => ({ asr: {} }),
     readRecording: async () => Buffer.from('RIFF fake wav data').toString('base64')
   }
-  for (const name of ['Subtitle', 'Status', 'DisplaysChanged', 'OverlayVisible', 'AudioDevices', 'MicTest',
-    'RecordResult', 'RecordLevel', 'RecognizeResult', 'EnvState', 'InstallProgress', 'Config']) {
+  for (const name of ['Subtitle', 'Status', 'DisplaysChanged', 'OverlayVisible', 'AudioDevices',
+    'AudioOutputDevices', 'MicTest', 'RecordResult', 'RecordLevel', 'RecognizeResult', 'EnvState',
+    'InstallProgress', 'Config']) {
     api['on' + name] = cb => { events[name] = cb }
   }
   class Audio {
@@ -367,4 +368,54 @@ test('界面：设备选择使用原生ID，不再使用临时数字索引', () 
   const f = rendererFixture()
   f.events.AudioDevices([{ id: 'endpoint-native-123', name: 'Native mic', default: true, api: 'Windows Media Foundation' }])
   assert.equal(f.element('audioDevice').children.find(option => option.value === 'endpoint-native-123').textContent, 'Native mic')
+})
+
+function configFixture (saved) {
+  const module = { exports: {} }
+  let written = null
+  vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'electron/config.js'), 'utf8'), {
+    module, console,
+    require (name) {
+      if (name === 'electron') return { app: { getPath: () => 'test-user-data' } }
+      if (name === 'fs') return {
+        readFileSync: () => JSON.stringify(saved),
+        mkdirSync () {},
+        writeFileSync: (_file, text) => { written = text }
+      }
+      return require(name)
+    }
+  })
+  return { api: module.exports, written: () => written }
+}
+
+test('配置：引擎白名单与接口字段归一化', () => {
+  const f = configFixture({
+    asr: {
+      engine: 'openai',
+      apiBaseUrl: '  https://api.test/v1  ',
+      apiKey: 12345,
+      apiModel: '   ',
+      apiLanguage: 'en',
+      apiPrompt: '  专有名词  ',
+      apiTimeout: 9999
+    }
+  })
+  const cfg = f.api.loadConfig()
+  // 未知引擎回落到本地默认，避免出现既无模型又无接口的悬空状态
+  assert.equal(cfg.asr.engine, 'funasr')
+  assert.equal(cfg.asr.apiBaseUrl, 'https://api.test/v1')
+  assert.equal(cfg.asr.apiKey, '')
+  assert.equal(cfg.asr.apiModel, 'whisper-1')
+  assert.equal(cfg.asr.apiLanguage, 'en')
+  assert.equal(cfg.asr.apiPrompt, '专有名词')
+  assert.equal(cfg.asr.apiTimeout, 120)
+})
+
+test('配置：接口模式保存后保留 api 引擎并限制超时下限', () => {
+  const f = configFixture({})
+  const saved = f.api.saveConfig({ asr: { engine: 'api', apiBaseUrl: 'https://api.test/v1', apiTimeout: 1 } })
+  assert.equal(saved.asr.engine, 'api')
+  assert.equal(saved.asr.apiBaseUrl, 'https://api.test/v1')
+  assert.equal(saved.asr.apiTimeout, 5)
+  assert.match(f.written(), /"engine": "api"/)
 })

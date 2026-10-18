@@ -55,6 +55,7 @@ hiddenimports = [
     'mock_engine',
     'asr_engine',
     'whisper_engine',
+    'api_engine',
 ]
 hiddenimports += collect_submodules('faster_whisper')
 hiddenimports += collect_submodules('ctranslate2')

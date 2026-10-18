@@ -34,7 +34,7 @@ const DEFAULTS = {
 
   // 识别引擎
   asr: {
-    engine: 'funasr',       // funasr | whisper
+    engine: 'funasr',       // funasr | whisper | api
     model: 'paraformer-zh-streaming',
     modelRevision: 'v2.0.4',
     modelPath: '',          // 本地模型目录，留空则按模型名从 ModelScope 下载
@@ -42,10 +42,21 @@ const DEFAULTS = {
     usePunc: true,
     device: 'cpu',          // 推理设备：cpu | cuda:0
     audioDevice: null,      // null = 系统默认，否则为稳定的 Media Foundation endpoint ID
+    // 采集模式：input = 麦克风；output = 电脑声音输出（WASAPI 环回采集扬声器）
+    captureSource: 'input',
+    audioOutputDevice: null, // output 模式下的扬声器 endpoint ID，null = 系统默认
     cacheDir: '',           // 留空则用项目下 models/
     whisperModel: 'small',  // tiny | base | small | medium | large-v3
     computeType: 'int8',    // int8 | float16 | float32
-    language: 'zh'          // zh | en | auto
+    language: 'zh',         // zh | en | auto
+
+    // 接口（云端 API）模式：本地只做采集，按段发给 OpenAI 兼容的转写接口
+    apiBaseUrl: '',         // 例：https://api.openai.com/v1（留空表示未配置）
+    apiKey: '',
+    apiModel: 'whisper-1',
+    apiLanguage: '',        // 留空跟随 language
+    apiPrompt: '',          // 可选提示词，用于专有名词
+    apiTimeout: 30          // 单次请求超时（秒），5 ~ 120
   }
 }
 
@@ -62,13 +73,31 @@ function configPath () {
 
 function normalizeAsr (asr) {
   const next = { ...asr }
-  delete next.recordBackend // capture is always Media Foundation, including old saved configs
-  const device = next.audioDevice
-  if (typeof device === 'number') {
-    next.audioDevice = null
-    next.audioDeviceMigrated = true
-  } else if (device != null && (typeof device !== 'string' || !device.trim())) {
-    next.audioDevice = null
+  delete next.recordBackend // capture is always Windows native, including old saved configs
+  // 引擎只接受三种：本地 FunASR、本地 Whisper、云端接口
+  if (!['funasr', 'whisper', 'api'].includes(next.engine)) next.engine = 'funasr'
+  // 采集模式：input = 麦克风（Media Foundation）；output = 电脑声音输出（WASAPI 环回）
+  next.captureSource = next.captureSource === 'output' ? 'output' : 'input'
+
+  // 接口（云端 API）字段：文本项去空白，类型不对就回落默认值
+  for (const [key, fallback] of [['apiBaseUrl', ''], ['apiKey', ''], ['apiModel', 'whisper-1'],
+    ['apiLanguage', ''], ['apiPrompt', '']]) {
+    const value = next[key]
+    const text = typeof value === 'string' ? value.trim() : fallback
+    // 模型名不能是空串，否则请求体里的 model 字段会失效
+    next[key] = key === 'apiModel' && !text ? 'whisper-1' : text
+  }
+  const timeout = Number(next.apiTimeout)
+  next.apiTimeout = Number.isFinite(timeout) ? Math.min(120, Math.max(5, Math.round(timeout))) : 30
+  // 两种模式各存一个稳定 endpoint ID，互不覆盖；切换模式不用重新选设备
+  for (const key of ['audioDevice', 'audioOutputDevice']) {
+    const value = next[key]
+    if (typeof value === 'number') {
+      next[key] = null
+      if (key === 'audioDevice') next.audioDeviceMigrated = true
+    } else if (value != null && (typeof value !== 'string' || !value.trim())) {
+      next[key] = null
+    }
   }
   return next
 }
@@ -96,9 +125,16 @@ function saveConfig (patch) {
   }
 
   next.asr = normalizeAsr(next.asr)
-  if (patch && patch.asr && Object.prototype.hasOwnProperty.call(patch.asr, 'audioDevice') &&
-      (patch.asr.audioDevice == null || typeof patch.asr.audioDevice === 'string')) {
-    next.asr.audioDeviceMigrated = false
+  // 用户明确选择了设备后清掉「已迁移/需重新确认」提示，两类端点各自独立
+  if (patch && patch.asr && typeof patch.asr === 'object') {
+    for (const [field, flag] of [['audioDevice', 'audioDeviceMigrated'],
+      ['audioOutputDevice', 'audioOutputDeviceMigrated']]) {
+      const value = patch.asr[field]
+      if (Object.prototype.hasOwnProperty.call(patch.asr, field) &&
+          (value == null || typeof value === 'string')) {
+        next.asr[flag] = false
+      }
+    }
   }
 
   for (const key of NUMBER_KEYS) {

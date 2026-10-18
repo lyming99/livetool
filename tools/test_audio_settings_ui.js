@@ -26,6 +26,11 @@ const devices = [
   { id: 'ui-default', name: '默认麦克风', default: true },
   { id: 'ui-selected', name: '外接麦克风', default: false }
 ]
+// 电脑声音输出（WASAPI 环回采集的扬声器端点）
+const outputDevices = [
+  { id: 'ui-speaker-default', name: '默认扬声器', default: true },
+  { id: 'ui-speaker-headset', name: '耳机', default: false }
+]
 const send = (channel, payload) => win.webContents.send(channel, payload)
 
 ipcMain.handle('config:get', () => cfg)
@@ -47,7 +52,11 @@ ipcMain.handle('displays:list', () => {
     workWidth: d.workArea.width, workHeight: d.workArea.height,
     x: d.bounds.x, y: d.bounds.y, scaleFactor: d.scaleFactor }]
 })
-ipcMain.handle('devices:list', () => { send('audio:devices', devices); return true })
+ipcMain.handle('devices:list', () => {
+  send('audio:devices', devices)
+  send('audio:output-devices', outputDevices)
+  return true
+})
 ipcMain.handle('env:check', () => {
   send('env:state', { ready: true, deps: [{ package: '界面验证', installed: true }] })
   return true
@@ -140,9 +149,57 @@ app.whenReady().then(async () => {
       }
     })()`)
     assert.deepEqual(controls.buttons, ['刷新', '录制 5 秒', '识别录音', '播放录音'])
-    assert.equal(controls.selectors, 1)
+    // 采集模式 + 设备两个下拉框
+    assert.equal(controls.selectors, 2)
     assert.deepEqual(controls.removed, [])
     assert.doesNotMatch(controls.text, /参考 wenzflow|与 wenzflow 同类|播放原录音|测试麦克风|录音采集/)
+
+    // 采集模式：默认麦克风，可切换到电脑声音输出并渲染扬声器列表
+    const captureDefault = await win.webContents.executeJavaScript(`(() => {
+      const source = document.getElementById('captureSource')
+      const device = document.getElementById('audioDevice')
+      return {
+        value: source.value,
+        options: [...source.options].map(option => option.value),
+        label: document.getElementById('audioDeviceLabel').textContent,
+        deviceValues: [...device.options].map(option => option.value),
+        hint: document.getElementById('captureSourceHint').textContent
+      }
+    })()`)
+    assert.deepEqual(captureDefault.options, ['input', 'output'])
+    assert.equal(captureDefault.value, 'input')
+    assert.equal(captureDefault.label, '麦克风')
+    assert.match(captureDefault.hint, /麦克风/)
+
+    // 切到电脑声音输出：标签、提示与设备列表都换成扬声器
+    await win.webContents.executeJavaScript(`(() => {
+      const source = document.getElementById('captureSource')
+      source.value = 'output'
+      source.dispatchEvent(new Event('change'))
+    })()`)
+    await waitFor("document.getElementById('audioDeviceLabel').textContent === '扬声器'")
+    const captureOutput = await win.webContents.executeJavaScript(`(() => {
+      const device = document.getElementById('audioDevice')
+      return {
+        source: cfg.asr.captureSource,
+        label: document.getElementById('audioDeviceLabel').textContent,
+        deviceValues: [...device.options].map(option => option.value),
+        hint: document.getElementById('captureSourceHint').textContent
+      }
+    })()`)
+    assert.equal(captureOutput.source, 'output')
+    assert.equal(captureOutput.label, '扬声器')
+    assert.deepEqual(captureOutput.deviceValues, ['default', 'ui-speaker-default', 'ui-speaker-headset'])
+    assert.match(captureOutput.hint, /电脑声音输出/)
+
+    // 切回麦克风，设备列表恢复
+    await win.webContents.executeJavaScript(`(() => {
+      const source = document.getElementById('captureSource')
+      source.value = 'input'
+      source.dispatchEvent(new Event('change'))
+    })()`)
+    await waitFor("document.getElementById('audioDeviceLabel').textContent === '麦克风'")
+    assert.equal(await win.webContents.executeJavaScript('cfg.asr.captureSource'), 'input')
 
     // 显示方式：默认实时，此时草稿行开关可用、定稿延时说明不生效
     const modeDefaults = await win.webContents.executeJavaScript(`(() => {
@@ -209,6 +266,68 @@ app.whenReady().then(async () => {
       console.log('MODE SCREENSHOT: ' + modePath)
     }
     console.log('SUBTITLE MODE CONTROLS PASS')
+
+    // 识别引擎：接口（云端 API）区块的字段、联动提示与配置落盘
+    const engineOptions = await win.webContents.executeJavaScript(
+      "[...document.getElementById('asrEngine').options].map(o => o.value)")
+    assert.deepEqual(engineOptions, ['funasr', 'whisper', 'api'])
+
+    await win.webContents.executeJavaScript(`(() => {
+      const engine = document.getElementById('asrEngine')
+      engine.value = 'api'
+      engine.dispatchEvent(new Event('change'))
+      document.getElementById('apiBaseUrl').value = 'https://api.test/v1'
+      document.getElementById('apiBaseUrl').dispatchEvent(new Event('change'))
+      document.getElementById('apiModel').value = 'whisper-1'
+      document.getElementById('apiModel').dispatchEvent(new Event('change'))
+      document.getElementById('apiTimeout').value = '45'
+      document.getElementById('apiTimeout').dispatchEvent(new Event('change'))
+    })()`)
+    await pause(300)
+
+    const apiBlock = await win.webContents.executeJavaScript(`(() => {
+      const block = document.querySelector('.engine-block[data-engine="api"]')
+      const style = getComputedStyle(block)
+      return {
+        visible: style.display !== 'none',
+        activeBlocks: [...document.querySelectorAll('.engine-block.active')]
+          .map(node => node.dataset.engine),
+        hasFields: ['apiBaseUrl', 'apiKey', 'apiModel', 'apiLanguage', 'apiPrompt', 'apiTimeout']
+          .every(id => !!document.getElementById(id)),
+        languageOptions: [...document.getElementById('apiLanguage').options].map(o => o.value),
+        installHint: document.getElementById('installHint').textContent,
+        installButton: document.getElementById('btnInstall').textContent.trim(),
+        engine: cfg.asr.engine,
+        baseUrl: cfg.asr.apiBaseUrl,
+        timeout: cfg.asr.apiTimeout
+      }
+    })()`)
+    assert.equal(apiBlock.visible, true)
+    assert.deepEqual(apiBlock.activeBlocks, ['api'])
+    assert.equal(apiBlock.hasFields, true)
+    assert.deepEqual(apiBlock.languageOptions, ['zh', 'en', 'auto'])
+    assert.match(apiBlock.installHint, /接口模式不用下载模型/)
+    assert.equal(apiBlock.installButton, '校验接口配置')
+    assert.equal(apiBlock.engine, 'api')
+    assert.equal(apiBlock.baseUrl, 'https://api.test/v1')
+    assert.equal(apiBlock.timeout, 45)
+    console.log('API ENGINE BLOCK PASS')
+
+    // 切回本地引擎：区块收起，按钮文案恢复
+    await win.webContents.executeJavaScript(`(() => {
+      const engine = document.getElementById('asrEngine')
+      engine.value = 'funasr'
+      engine.dispatchEvent(new Event('change'))
+    })()`)
+    await pause(200)
+    const backToLocal = await win.webContents.executeJavaScript(`(() => ({
+      engine: cfg.asr.engine,
+      activeBlocks: [...document.querySelectorAll('.engine-block.active')].map(node => node.dataset.engine),
+      installButton: document.getElementById('btnInstall').textContent.trim()
+    }))()`)
+    assert.equal(backToLocal.engine, 'funasr')
+    assert.deepEqual(backToLocal.activeBlocks, ['funasr'])
+    assert.equal(backToLocal.installButton, '一键安装 / 下载模型')
 
     await win.webContents.executeJavaScript(`(() => {
       const select = document.getElementById('audioDevice')
