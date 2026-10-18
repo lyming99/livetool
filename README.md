@@ -8,6 +8,12 @@
 
 使用funasr、whisper模型实现语音识别、断句，然后用electron框架显示识别内容字幕到屏幕上。
 
+## 开发工具
+
+模型：deepseek v4.1 flash - 1017
+
+agent工具(个人产品，打个广告)：wenzflow
+
 ## 视频介绍
 
 - [https://www.bilibili.com/video/BV1aBJz6EEtE](https://www.bilibili.com/video/BV1aBJz6EEtE)
