@@ -10,9 +10,9 @@
 
 ## 开发工具
 
-模型：deepseek v4.1 flash - 1017
+模型：[deepseek v4.1 flash - 1017](https://platform.deepseek.com)
 
-agent工具(个人产品，打个广告)：\[wenzflow\](https://wenzflow.com)
+agent工具(个人产品，打个广告)：[wenzflow](https://wenzflow.com)
 
 ## 视频介绍
 
