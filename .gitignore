@@ -1,0 +1,9 @@
+node_modules/
+models/
+dist/
+build/
+out/
+__pycache__/
+*.pyc
+.debug-*.png
+.DS_Store

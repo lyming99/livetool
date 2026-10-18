@@ -1,0 +1,63 @@
+{
+  "name": "livetool",
+  "version": "0.1.6",
+  "description": "Windows 直播实时语音字幕悬浮窗",
+  "main": "electron/main.js",
+  "private": true,
+  "author": "livetool",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build:backend": "npm run build:audio && python tools/patch_funasr.py && python -m PyInstaller tools/backend.spec --noconfirm --distpath build --workpath build/tmp",
+    "dist": "electron-builder --win nsis",
+    "build:audio": "tools\\build_audio_capture.cmd"
+  },
+  "build": {
+    "appId": "com.livetool.subtitle",
+    "productName": "livetool",
+    "copyright": "Copyright © 2026 livetool",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "electron/**/*",
+      "renderer/**/*",
+      "assets/icon.png",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/livetool-backend",
+        "to": "backend"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "${productName}-${version}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "livetool",
+      "uninstallDisplayName": "livetool 实时字幕",
+      "deleteAppDataOnUninstall": false
+    }
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.15.3"
+  }
+}
