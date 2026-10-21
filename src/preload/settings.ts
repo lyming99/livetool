@@ -16,6 +16,7 @@ const api: SettingsAPI = {
   checkEnv: engine => ipcRenderer.invoke('env:check', engine), testMic: () => ipcRenderer.invoke('mic:test'),
   testRecord: seconds => ipcRenderer.invoke('test:record', seconds), testRecognize: () => ipcRenderer.invoke('test:recognize'),
   readRecording: kind => ipcRenderer.invoke('recording:read', kind), runInstall: engine => ipcRenderer.invoke('install:run', engine),
+  chooseRecordingDir: () => ipcRenderer.invoke('recording:choose-dir'), openRecordingDir: () => ipcRenderer.invoke('recording:open-dir'),
   setClickThrough: value => ipcRenderer.invoke('overlay:set-click-through', value), setOverlayVisible: value => ipcRenderer.invoke('overlay:set-visible', value),
   toggleEngine: () => ipcRenderer.invoke('engine:toggle'), reloadEngine: () => ipcRenderer.invoke('engine:reload'),
   quit: () => ipcRenderer.invoke('app:quit'),
@@ -25,6 +26,7 @@ const api: SettingsAPI = {
   onAudioOutputDevices: cb => subscribe('audio:output-devices', cb), onCaptureSwitch: cb => subscribe('audio:capture-switch', cb),
   onMicTest: cb => subscribe('mic:test', cb), onRecordResult: cb => subscribe('record:result', cb),
   onRecordLevel: cb => subscribe('record:level', cb), onRecognizeResult: cb => subscribe('recognize:result', cb),
-  onEnvState: cb => subscribe('env:state', cb), onInstallProgress: cb => subscribe('install:progress', cb)
+  onEnvState: cb => subscribe('env:state', cb), onInstallProgress: cb => subscribe('install:progress', cb),
+  onSession: cb => subscribe('session', cb)
 }
 contextBridge.exposeInMainWorld('settingsAPI', api)

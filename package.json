@@ -1,6 +1,6 @@
 {
   "name": "livetool",
-  "version": "0.1.9",
+  "version": "0.2.1",
   "description": "Windows 直播实时语音字幕悬浮窗",
   "main": "out/main/index.js",
   "private": true,

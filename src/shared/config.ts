@@ -11,6 +11,8 @@ export const asrSchema = z.object({
   whisperModel: z.string(), computeType: z.string(), language: z.string(),
   apiBaseUrl: z.string(), apiKey: z.string(), apiModel: z.string(),
   apiLanguage: z.string(), apiPrompt: z.string(), apiTimeout: z.number().finite(),
+  recordEnabled: z.boolean(), recordDir: z.string(),
+  recordSegmentSeconds: z.number().finite(), recordSubtitleFormat: z.enum(['srt', 'vtt']),
   audioDeviceMigrated: z.boolean().optional(), audioOutputDeviceMigrated: z.boolean().optional()
 })
 export const configSchema = z.object({
@@ -67,6 +69,8 @@ export function normalizeConfig(saved: unknown): AppConfig {
   next.maxLines = Math.round(clamp(next.maxLines, 1, 20))
   next.offsetY = clamp(next.offsetY, 0, 10000)
   next.asr.apiTimeout = Math.round(clamp(next.asr.apiTimeout, 5, 120))
+  next.asr.recordSegmentSeconds = Math.round(clamp(next.asr.recordSegmentSeconds, 30, 3600))
+  next.asr.recordDir = next.asr.recordDir.trim()
   for (const key of ['apiBaseUrl', 'apiKey', 'apiModel', 'apiLanguage', 'apiPrompt'] as const) next.asr[key] = next.asr[key].trim()
   if (!next.asr.apiModel) next.asr.apiModel = 'whisper-1'
   for (const key of ['audioDevice', 'audioOutputDevice'] as const) if (next.asr[key] !== null && !next.asr[key]?.trim()) next.asr[key] = null

@@ -66,6 +66,8 @@ class Backend:
         self._session = 0
         self._test_model = None
         self._lock = threading.Lock()
+        # 会话录制器：开启录制时在 start() 创建，停止时收尾落盘
+        self.recorder = None
 
     # ---- 事件回调（由引擎在识别线程里调用） ----
 
@@ -77,10 +79,147 @@ class Backend:
 
     def on_final(self, text: str) -> None:
         log(f"final: {text}")
+        recorder = self.recorder
+        if recorder is not None:
+            try:
+                recorder.add_final(text)
+                self.emit_session("recording", recorder, "")
+            except Exception as exc:
+                log("写入字幕失败：", repr(exc))
         emit({"type": "final", "text": text, "ts": time.time()})
 
     def on_status(self, state: str, detail: str = "") -> None:
+        if state == "error" and self.recorder is not None:
+            # 引擎报错后不会再有音频进来：立刻收尾落盘，避免会话一直挂着不完整
+            try:
+                self._finish_recording("failed")
+            except Exception as exc:  # pragma: no cover - 收尾失败仍要上报状态
+                log("引擎报错后收尾录制失败：", repr(exc))
         emit({"type": "status", "state": state, "detail": detail})
+
+    # ---- 会话录制 ----
+
+    def _session_event(self, state: str, recorder=None, detail: str = "") -> dict:
+        recorder = self.recorder if recorder is None else recorder
+        summary = {}
+        if recorder is not None:
+            try:
+                summary = recorder.summary()
+            except Exception as exc:  # pragma: no cover - 汇总失败只影响展示
+                log("读取录制会话信息失败：", repr(exc))
+        return {
+            "type": "session",
+            "state": state,
+            "active": state == "recording" and recorder is not None,
+            "directory": summary.get("directory") or None,
+            "subtitlePath": summary.get("subtitlePath") or None,
+            "segments": summary.get("segments", 0),
+            "cues": summary.get("cues", 0),
+            "durationSeconds": summary.get("durationSeconds", 0.0),
+            "detail": detail,
+        }
+
+    def emit_session(self, state: str, recorder=None, detail: str = "") -> None:
+        emit(self._session_event(state, recorder, detail))
+
+    def _begin_recording(self, cfg: dict) -> None:
+        """按配置创建本次识别会话的录制器；失败时只降级为「只识别」。"""
+        if not cfg.get("recordEnabled"):
+            self.recorder = None
+            self.emit_session("idle", None, "")
+            return
+        recorder = None
+        try:
+            from audio_devices import capture_target
+            from session_recorder import SessionRecorder
+
+            target = capture_target(cfg)
+            base = (cfg.get("recordDir") or "").strip() or os.path.join(_data_dir(), "recordings")
+            recorder = SessionRecorder(
+                base,
+                segment_seconds=cfg.get("recordSegmentSeconds") or 300,
+                subtitle_format=cfg.get("recordSubtitleFormat") or "srt",
+                engine=(cfg.get("engine") or ""),
+                source_kind=target["kind"], source_label=target["label"],
+                # 开启录制即同时录真实音频；只存字幕不在界面暴露，避免出现无音频的“录音”会话
+                include_audio=True,
+                log=log,
+            )
+            recorder.start()
+        except Exception as exc:
+            log("创建录制会话失败：", repr(exc))
+            self.recorder = None
+            self.emit_session("error", None, f"无法创建录制文件：{exc}")
+            return
+        self.recorder = recorder
+        self.emit_session("recording", recorder, f"正在录制到 {recorder.directory}")
+
+    def _finish_recording(self, status: str = "completed") -> dict | None:
+        """关闭录制器并把最终文件信息上报；重复调用是安全的。"""
+        recorder, self.recorder = self.recorder, None
+        if recorder is None:
+            self.emit_session("idle", None, "")
+            return None
+        try:
+            manifest = recorder.close(status)
+        except Exception as exc:
+            log("结束录制失败：", repr(exc))
+            manifest = None
+        self.emit_session(status if status in ("completed", "failed", "interrupted") else "stopped",
+                          recorder, f"录制已保存到 {recorder.directory}")
+        return manifest
+
+    def set_record(self, enabled: bool, config: dict | None = None) -> None:
+        """运行中即时启停录制会话；识别本身不受影响。
+
+        以前只有 start() 时读一次 recordEnabled，用户在识别过程中打开开关不会
+        生效，界面就一直停在「等待录制会话就绪」。这里让开关立刻生效：
+        开启时补建录制会话（新会话目录从现在开始），关闭时收尾落盘。
+        未在识别时只记住配置，下次 start() 会按它创建。
+        """
+        with self._lock:
+            if config:
+                self.asr_config = dict(config)
+            cfg = dict(self.asr_config)
+            running = self.running
+            engine = self.engine
+        if not running:
+            # 未运行：不创建空会话，等 start() 时按新配置处理
+            return
+        if enabled:
+            if self.recorder is not None:
+                # 已经在录：只把当前状态回给界面，不重复建目录
+                self.emit_session("recording", self.recorder,
+                                  f"正在录制到 {self.recorder.directory}")
+                return
+            self._begin_recording({**cfg, "recordEnabled": True})
+            if engine is not None and self.recorder is not None:
+                engine.recorder = self.recorder
+            return
+        # 关闭：先把引用断开，避免引擎线程继续往已关闭的录制器写音频。
+        # 这是用户主动结束录制（识别仍在继续），会话算正常完成。
+        if engine is not None:
+            engine.recorder = None
+        self._finish_recording("completed")
+
+    def abort(self, detail: str) -> None:
+        """异常路径：先把已录内容落盘，再报告错误。
+
+        由 main() 的异常分支与 sys.excepthook / threading.excepthook 调用。
+        录制器本身已经按秒回填 WAV 头、按 5 秒刷新清单，所以即使这里是
+        「进程被强杀后重启」，也只会丢最后一个刷新间隔的内容。
+        """
+        log("异常退出，先保存录制内容：", detail)
+        try:
+            self._finish_recording("interrupted")
+        except Exception as exc:  # pragma: no cover - 收尾失败也要继续报错
+            log("异常收尾失败：", repr(exc))
+        try:
+            with self._lock:
+                self.running = False
+            self.on_status("error", detail)
+        except Exception:  # pragma: no cover - stdout 已断开时忽略
+            pass
 
     # ---- 控制 ----
 
@@ -98,6 +237,7 @@ class Backend:
                 self.asr_config = dict(asr_config)
             cfg = dict(self.asr_config)
 
+        self._begin_recording(cfg)
         self.on_status("starting", "正在加载识别引擎")
         try:
             threading.Thread(target=self._boot_engine, args=(cfg, session), daemon=True).start()
@@ -128,6 +268,8 @@ class Backend:
                     return
                 # Track the engine BEFORE model loading, so stop can cancel its startup.
                 self.engine = engine
+                # 只有真实引擎有采集流；mock 模式没有音频可录
+                engine.recorder = self.recorder
             engine.start(
                 on_partial=lambda text: self.on_partial(text) if current() else None,
                 on_final=lambda text: self.on_final(text) if current() else None,
@@ -151,6 +293,7 @@ class Backend:
                     self.engine = None
             if active:
                 log("engine start failed:", repr(exc))
+                self._finish_recording("failed")
                 emit({"type": "error", "message": f"识别引擎启动失败：{exc}"})
 
     def _create_engine(self, config=None):
@@ -643,13 +786,19 @@ class Backend:
             self.running = False
             self._session += 1
             engine, self.engine = self.engine, None
+            if engine is not None:
+                # 先断开引用，避免引擎线程收尾时继续往已关闭的录制器写音频
+                engine.recorder = None
         if not was_running and engine is None:
+            self._finish_recording("stopped")
             return
         if engine is not None:
             try:
                 engine.stop()
             except Exception as exc:
                 log("engine stop failed:", repr(exc))
+        # 字幕与音频文件在这里落盘：即使识别被异常中断，已录内容也会保留
+        self._finish_recording("completed" if was_running else "stopped")
         self.on_status("stopped")
 
 
@@ -717,6 +866,8 @@ def stdin_loop(backend: Backend) -> None:
             backend.check_env(cmd.get("engine"), cmd.get("asr"))
         elif kind == "switch_capture":
             backend.switch_capture(cmd.get("asr"))
+        elif kind == "set_record":
+            backend.set_record(bool(cmd.get("enabled")), cmd.get("asr"))
         elif kind == "install":
             backend.install(cmd.get("engine"), cmd.get("asr"))
         elif kind == "stop":
@@ -765,11 +916,35 @@ def main() -> None:
     emit({"type": "status", "state": "idle", "detail": ""})
     backend = Backend(mock=args.mock)
 
+    # 任何未捕获异常都先收尾录制会话再退出：主进程会重新拉起本进程，
+    # 已录内容不能因为崩溃而丢掉。
+    def handle_exception(exc_type, exc, tb, thread=None) -> None:
+        name = getattr(thread, "name", "main") if thread is not None else "main"
+        detail = f"{exc_type.__name__}: {exc}（线程 {name}）"
+        try:
+            backend.abort(detail)
+        finally:
+            import traceback
+
+            traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+
+    def thread_exception(hook_args) -> None:
+        handle_exception(hook_args.exc_type, hook_args.exc_value,
+                         hook_args.exc_traceback, hook_args.thread)
+
+    sys.excepthook = handle_exception
+    threading.excepthook = thread_exception
+
     try:
         stdin_loop(backend)
     except KeyboardInterrupt:
         pass
+    except BaseException as exc:  # noqa: BLE001 - 崩溃前必须先保住已录内容
+        log("主循环异常，先保存录制内容：", repr(exc))
+        backend.abort(f"{type(exc).__name__}: {exc}")
+        raise
     finally:
+        # stop() 内部会再调用一次 _finish_recording，重复调用是安全的
         backend.stop()
 
 

@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 MODULES = [
     "test_api_engine", "test_capture_switch", "test_mf_capture",
     "test_native_subtitles", "test_loopback_capture", "test_recording_regression",
+    "test_session_recorder", "test_record_toggle",
 ]
 
 if __name__ == "__main__":

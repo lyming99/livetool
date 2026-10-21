@@ -56,6 +56,8 @@ class WhisperEngine:
         self.cache_root = (cfg.get("cacheDir") or "").strip() or models_dir
         self.language = (cfg.get("language") or "zh").strip()
 
+        # 会话录制器（由 Backend 注入）；None 表示本次不录制
+        self.recorder = None
         self._model = None
         self._capture = None
         self._stop = threading.Event()
@@ -130,6 +132,7 @@ class WhisperEngine:
 
     def _read_loop(self, on_status) -> None:
         from mf_stream import SwitchablePcmStream
+        from session_recorder import feed
 
         stream = SwitchablePcmStream(self.audio_device, kind=self.capture_kind,
                                      sample_rate=SAMPLE_RATE, stop_event=self._stop)
@@ -141,6 +144,8 @@ class WhisperEngine:
                 audio = stream.read(BLOCK_SAMPLES)
                 if not audio.size:
                     break
+                # 真实语音分流给录制器（未开启录制时 recorder 为 None，零开销）
+                feed(self.recorder, audio)
                 try:
                     self._audio_q.put_nowait(audio)
                 except queue.Full:
@@ -160,6 +165,7 @@ class WhisperEngine:
 
     def _run(self, on_partial, on_final, on_status) -> None:
         import numpy as np
+        from session_recorder import mark_discontinuity
 
         self._reader = threading.Thread(target=self._read_loop, args=(on_status,), daemon=True, name="whisper-audio")
         self._reader.start()
@@ -181,6 +187,7 @@ class WhisperEngine:
                 pending = np.zeros(0, dtype=np.float32)
                 silence = 0.0
                 last_partial = 0.0
+                mark_discontinuity(self.recorder)
                 on_partial("")
                 on_status("running", CAPTURE_STATUS[self.capture_kind])
 

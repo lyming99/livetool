@@ -41,11 +41,19 @@ ipcMain.handle('config:set', (_event, patch) => {
   send('config:changed', cfg)
   return cfg
 })
+let session = {
+  active: false, directory: null, subtitlePath: null,
+  segments: 0, cues: 0, durationSeconds: 0, detail: ''
+}
 ipcMain.handle('app:status', () => ({
   running: false, recording, micTesting: false, recognizing: false,
   recordingPath, clickThrough: true, overlayVisible: true,
-  engine: { state: 'idle', detail: '' }, mock: true, packaged
+  engine: { state: 'idle', detail: '' }, pythonPid: null, mock: true, packaged,
+  session
 }))
+// 录制目录选择/打开：只模拟返回值，不触碰真实文件系统
+ipcMain.handle('recording:choose-dir', () => path.join(temp, 'recordings'))
+ipcMain.handle('recording:open-dir', () => true)
 ipcMain.handle('displays:list', () => {
   const d = screen.getPrimaryDisplay()
   return [{ id: d.id, label: d.label || '主显示器', primary: true,
@@ -418,6 +426,55 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript("document.getElementById('btnRecognizeTest').click()")
     await waitFor("document.getElementById('recordResult').innerText.includes('界面回归测试')")
     assert.equal(commands[2].type, 'recognize')
+
+    // 语音与字幕录制面板：控件齐全，开关与目录选择走真实 preload -> config:set
+    const recordingPanel = await win.webContents.executeJavaScript(`(() => {
+      const section = document.getElementById('recordEnabled').closest('section')
+      return {
+        title: section.querySelector('h2').textContent,
+        dir: !!document.getElementById('recordDir'),
+        choose: !!document.getElementById('btnChooseRecordDir'),
+        open: !!document.getElementById('btnOpenRecordDir'),
+        segment: !!document.getElementById('recordSegmentSeconds'),
+        format: !!document.getElementById('recordSubtitleFormat'),
+        segmentDisabled: document.getElementById('recordSegmentSeconds').disabled
+      }
+    })()`)
+    assert.equal(recordingPanel.title, '语音与字幕录制')
+    assert.equal(recordingPanel.dir, true)
+    assert.equal(recordingPanel.choose, true)
+    assert.equal(recordingPanel.open, true)
+    assert.equal(recordingPanel.segment, true)
+    assert.equal(recordingPanel.format, true)
+    // 未开启录制时段落时长与字幕格式不可编辑
+    assert.equal(recordingPanel.segmentDisabled, true)
+
+    await win.webContents.executeJavaScript("document.getElementById('recordEnabled').click()")
+    await waitFor("document.getElementById('recordSegmentSeconds').disabled === false")
+    await win.webContents.executeJavaScript(`(() => {
+      const select = document.getElementById('recordSubtitleFormat')
+      window.__setControlValue(select, 'vtt')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })()`)
+    await win.webContents.executeJavaScript("document.getElementById('btnChooseRecordDir').click()")
+    await waitFor("document.getElementById('recordDir').value.endsWith('recordings')")
+    await pause(150)
+    assert.equal(cfg.asr.recordEnabled, true)
+    assert.equal(cfg.asr.recordSubtitleFormat, 'vtt')
+    assert.ok(cfg.asr.recordDir.endsWith('recordings'), cfg.asr.recordDir)
+    // 会话状态经 status 送达时面板能展示目录与统计
+    session = {
+      active: true, directory: path.join(temp, 'recordings', '20261022-143508'),
+      subtitlePath: path.join(temp, 'recordings', '20261022-143508', 'subtitles.vtt'),
+      segments: 2, cues: 5, durationSeconds: 64.5, detail: '正在录制到 ' + path.join(temp, 'recordings', '20261022-143508')
+    }
+    await pause(1200)
+    const sessionText = await win.webContents.executeJavaScript("document.getElementById('recordSessionBox').innerText")
+    assert.match(sessionText, /片段 2 个/)
+    assert.match(sessionText, /字幕 5 条/)
+    assert.match(sessionText, /20261022-143508/)
+    console.log('RECORDING PANEL PASS')
+
     assert.equal(errors.length, 0, errors.join('\n'))
 
     if (captureArg) {

@@ -58,6 +58,13 @@ describe('识别进程与诊断生命周期', () => {
   it('来源切换只下发 switch_capture，不重载模型', () => {
     const f = fixture(); f.service.start(); f.service.switchCapture(); expect(f.bridge.commands.map(command => command.type)).toEqual(['start', 'switch_capture'])
   })
+  it('录制开关变更即时下发 set_record，带上当前 enabled 与配置', () => {
+    const f = fixture(); f.service.start(); f.bridge.commands.length = 0
+    expect(f.service.setRecord(true)).toBe(true)
+    expect(f.bridge.commands).toEqual([{ type: 'set_record', enabled: true, asr: DEFAULTS.asr }])
+    f.service.setRecord(false)
+    expect(f.bridge.commands[1]).toMatchObject({ type: 'set_record', enabled: false })
+  })
   it('spawn 失败即使没有 exit 事件也能释放桥接器并重试', async () => {
     const factory = vi.fn(() => new PythonBridge({ executable: 'livetool-deliberately-missing-executable', cwd: process.cwd() }))
     const service = new SpeechService(factory, () => structuredClone(DEFAULTS), false)
@@ -68,6 +75,46 @@ describe('识别进程与诊断生命周期', () => {
     const before = factory.mock.calls.length
     service.ensure(); expect(factory).toHaveBeenCalledTimes(before + 1)
     await service.dispose()
+  })
+  it('识别进程异常退出后自动重启并恢复识别', async () => {
+    vi.useFakeTimers(); const f = fixture(); f.service.start()
+    f.bridge.emit('message', { type: 'status', state: 'running' })
+    f.bridge.emit('exit', { code: 1 })
+    expect(f.service.status.state).toBe('restarting')
+    expect(f.service.running).toBe(false)
+    await vi.advanceTimersByTimeAsync(900)
+    expect(f.bridge.commands.filter(command => command.type === 'start')).toHaveLength(2)
+    expect(f.service.running).toBe(true)
+  })
+  it('用户主动停止后进程退出不再自动重启', async () => {
+    vi.useFakeTimers(); const f = fixture(); f.service.start()
+    f.bridge.emit('message', { type: 'status', state: 'running' })
+    const stopping = f.service.toggle()
+    f.bridge.emit('message', { type: 'status', state: 'stopped' })
+    await expect(stopping).resolves.toBe(false)
+    f.bridge.emit('exit', { code: 0 })
+    expect(f.service.status.state).toBe('stopped')
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(f.bridge.commands.filter(command => command.type === 'start')).toHaveLength(1)
+  })
+  it('后端报告错误时先结束进程再自动重启', async () => {
+    vi.useFakeTimers(); const f = fixture(); f.service.start()
+    f.bridge.emit('message', { type: 'status', state: 'running' })
+    f.bridge.emit('message', { type: 'error', message: '识别引擎启动失败：模型损坏' })
+    expect(f.service.status.state).toBe('restarting')
+    expect(f.bridge.stop).toHaveBeenCalled()
+    f.bridge.emit('exit', { code: 1 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(f.bridge.commands.filter(command => command.type === 'start')).toHaveLength(2)
+  })
+  it('同一窗口内连续异常退出达到上限后停止自动重启', async () => {
+    vi.useFakeTimers(); const f = fixture(); f.service.start()
+    for (let attempt = 0; attempt < 6; attempt++) {
+      f.bridge.emit('exit', { code: 1 })
+      await vi.advanceTimersByTimeAsync(11000)
+    }
+    expect(f.service.status.state).toBe('error')
+    expect(f.service.status.detail).toContain('已停止自动重启')
   })
   it('无效 JSON/事件不会进入业务处理，普通日志仍可收集', () => {
     const bridge = new PythonBridge({ executable: 'not-started', cwd: '.', mock: true }); const message = vi.fn(); const log = vi.fn(); bridge.on('message', message); bridge.on('log', log)

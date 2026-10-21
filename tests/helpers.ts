@@ -11,7 +11,9 @@ export function deferred<T>() {
 export function status(patch: Partial<AppStatus> = {}): AppStatus {
   return { running: false, recording: false, micTesting: false, recognizing: false, recordingPath: null,
     referenceAvailable: false, clickThrough: true, overlayVisible: true, engine: { state: 'idle', detail: '' },
-    pythonPid: null, mock: true, packaged: false, ...patch }
+    pythonPid: null, mock: true, packaged: false,
+    session: { active: false, directory: null, subtitlePath: null, segments: 0, cues: 0, durationSeconds: 0, detail: '' },
+    ...patch }
 }
 export function apiFixture() {
   let config: AppConfig = structuredClone(DEFAULTS)
@@ -30,13 +32,14 @@ export function apiFixture() {
     testMic: vi.fn(async () => true), testRecord: vi.fn(async () => true), testRecognize: vi.fn(async () => true),
     readRecording: vi.fn(async () => Buffer.from('RIFF fake wav data').toString('base64')),
     runInstall: vi.fn(async () => true), setClickThrough: vi.fn(async value => value), setOverlayVisible: vi.fn(async value => value),
+    chooseRecordingDir: vi.fn(async () => 'D:\\recordings'), openRecordingDir: vi.fn(async () => true),
     toggleEngine: vi.fn(async () => true), reloadEngine: vi.fn(async () => true), quit: vi.fn(async () => {}),
     onConfig: event('Config'), onSubtitle: event('Subtitle'), onStatus: event('Status'),
     onDisplaysChanged: event('DisplaysChanged'), onOverlayVisible: event('OverlayVisible'),
     onAudioDevices: event('AudioDevices'), onAudioOutputDevices: event('AudioOutputDevices'),
     onCaptureSwitch: event('CaptureSwitch'), onMicTest: event('MicTest'), onRecordResult: event('RecordResult'),
     onRecordLevel: event('RecordLevel'), onRecognizeResult: event('RecognizeResult'), onEnvState: event('EnvState'),
-    onInstallProgress: event('InstallProgress')
+    onInstallProgress: event('InstallProgress'), onSession: event('Session')
   }
   return { api, config: () => config, emit: (name: string, value: unknown) => events.get(name)?.forEach(callback => callback(value)), count: () => [...events.values()].reduce((sum, callbacks) => sum + callbacks.size, 0) }
 }

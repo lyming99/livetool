@@ -1,10 +1,11 @@
 import type { AppConfig, ConfigPatch, Engine } from '../../../shared/config'
-import type { AppStatus, AudioDevice, CaptureSwitch, DisplayInfo, EnvironmentState, SettingsAPI, SubtitleState, Unsubscribe } from '../../../shared/contracts'
+import type { AppStatus, AudioDevice, CaptureSwitch, DisplayInfo, EnvironmentState, SessionStatus, SettingsAPI, SubtitleState, Unsubscribe } from '../../../shared/contracts'
 import { ConfigWriter } from './config-writer'
 import { DiagnosticsController, type DiagnosticState } from './diagnostics'
 
-export const STATE_TEXT: Record<string, string> = { idle: '未启动', starting: '加载中', loading: '加载中', ready: '就绪', running: '识别中', stopping: '正在停止', stopped: '已停止', error: '出错' }
-const initialStatus = (): AppStatus => ({ running: false, recording: false, micTesting: false, recognizing: false, recordingPath: null, referenceAvailable: false, clickThrough: true, overlayVisible: true, engine: { state: 'idle', detail: '' }, pythonPid: null, mock: false, packaged: false })
+export const STATE_TEXT: Record<string, string> = { idle: '未启动', starting: '加载中', loading: '加载中', ready: '就绪', running: '识别中', restarting: '自动重启中', stopping: '正在停止', stopped: '已停止', error: '出错' }
+export const EMPTY_SESSION: SessionStatus = { active: false, directory: null, subtitlePath: null, segments: 0, cues: 0, durationSeconds: 0, detail: '' }
+const initialStatus = (): AppStatus => ({ running: false, recording: false, micTesting: false, recognizing: false, recordingPath: null, referenceAvailable: false, clickThrough: true, overlayVisible: true, engine: { state: 'idle', detail: '' }, pythonPid: null, mock: false, packaged: false, session: { ...EMPTY_SESSION } })
 export interface SettingsSnapshot {
   config: AppConfig | null; status: AppStatus; devices: AudioDevice[]; outputs: AudioDevice[]; displays: DisplayInfo[];
   subtitle: SubtitleState; diagnostics: DiagnosticState; environment: EnvironmentState | null;
@@ -67,7 +68,8 @@ export class SettingsModel {
       this.api.onSubtitle(keep(value => { this.subtitle = value; this.changed() })),
       this.api.onStatus(keep(value => {
         this.statusRevision++
-        const running = ['starting', 'loading', 'running'].includes(value.state) ? true : ['idle', 'stopped'].includes(value.state) ? false : this.status.running
+        // restarting 表示服务会自己回来，仍按“运行中”处理，避免按钮闪回“开始识别”
+        const running = ['starting', 'loading', 'running', 'restarting'].includes(value.state) ? true : ['idle', 'stopped'].includes(value.state) ? false : this.status.running
         this.status = { ...this.status, running, engine: value }; this.changed()
         void this.refreshStatus().catch(this.fail)
       })),
@@ -81,6 +83,10 @@ export class SettingsModel {
       this.api.onRecordLevel(keep(value => this.diagnostics.level(value))),
       this.api.onRecognizeResult(keep(value => this.diagnostics.recognized(value))),
       this.api.onEnvState(keep(value => { this.environment = value; this.changed() })),
+      this.api.onSession(keep(value => {
+        // 会话事件与识别状态分开维护：录制不会改变引擎运行状态
+        this.status = { ...this.status, session: value }; this.changed()
+      })),
       this.api.onInstallProgress(keep(value => {
         if (value.phase === 'start') { this.installing = true; this.installLines = [`开始安装引擎：${value.engine}`] }
         else if (value.phase === 'log' && value.message) this.installLines = [...this.installLines, value.message].slice(-300)
@@ -154,6 +160,11 @@ export class SettingsModel {
       this.displayHint = '已重新读取显示器分辨率与缩放率，字幕层已按新尺寸重新贴合'
     } finally { this.refreshing = false; this.changed() }
   }
+  async chooseRecordDir(): Promise<void> {
+    const directory = await this.api.chooseRecordingDir()
+    if (directory) this.edit({ asr: { recordDir: directory } })
+  }
+  async openRecordDir(): Promise<void> { await this.api.openRecordingDir() }
   async quit(): Promise<void> { await this.writer.flush(); await this.api.quit() }
   async reset(): Promise<void> {
     await this.writer.flush()

@@ -51,6 +51,7 @@ hiddenimports = [
     'audio_devices',
     'mf_capture',
     'mf_stream',
+    'session_recorder',
     'installer',
     'mock_engine',
     'asr_engine',

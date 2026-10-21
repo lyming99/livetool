@@ -39,6 +39,10 @@
     "apiModel": "whisper-1",
     "apiLanguage": "",
     "apiPrompt": "",
-    "apiTimeout": 30
+    "apiTimeout": 30,
+    "recordEnabled": false,
+    "recordDir": "",
+    "recordSegmentSeconds": 300,
+    "recordSubtitleFormat": "srt"
   }
 }

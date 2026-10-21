@@ -10,7 +10,8 @@ import type { SubtitleController } from './modules/subtitles'
 export interface IpcServices {
   windows: WindowManager; config: ConfigRepository; speech: SpeechService; subtitles: SubtitleController;
   status(): AppStatus; patchConfig(patch: unknown): AppConfig; setClickThrough(value: boolean): boolean;
-  openSettings(): void; refreshDisplays(): unknown; recording(kind: 'current' | 'reference'): string | null; quit(): void
+  openSettings(): void; refreshDisplays(): unknown; recording(kind: 'current' | 'reference'): string | null; quit(): void;
+  chooseRecordingDir(): Promise<string | null>; openRecordingDir(): Promise<boolean>
 }
 
 /** All renderer capabilities are enumerated here; no arbitrary bridge commands or file paths. */
@@ -45,6 +46,9 @@ export function registerIpc(services: IpcServices): () => void {
   handle('engine:toggle', () => services.speech.toggle())
   handle('engine:reload', () => services.speech.reload())
   handle('recording:read', value => services.recording(z.enum(['current', 'reference']).default('current').parse(value)))
+  // 目录选择由主进程弹出系统对话框，渲染层拿不到任意路径写入能力。
+  handle('recording:choose-dir', () => services.chooseRecordingDir())
+  handle('recording:open-dir', () => services.openRecordingDir())
   handle('overlay:preview', value => services.subtitles.setPreview(z.string().max(20000).parse(value)))
   handle('overlay:set-visible', value => services.subtitles.setVisible(z.boolean().parse(value)))
   handle('overlay:set-click-through', value => services.setClickThrough(z.boolean().parse(value)), true)

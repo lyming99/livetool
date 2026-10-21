@@ -1,4 +1,4 @@
-import { app, Tray, Menu, globalShortcut, nativeImage, powerSaveBlocker, screen, safeStorage } from 'electron'
+import { app, Tray, Menu, globalShortcut, nativeImage, powerSaveBlocker, screen, safeStorage, dialog, shell } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { ConfigRepository } from './infrastructure/config-repository'
@@ -79,14 +79,15 @@ else {
     const status = (): AppStatus => ({
       running: speech.running, recording: speech.recording, micTesting: speech.micTesting, recognizing: speech.recognizing,
       recordingPath: speech.recordingPath, referenceAvailable: !!referenceFile(), clickThrough: config.load().clickThrough,
-      overlayVisible: subtitles.visible, engine: speech.status, pythonPid: speech.pid, mock, packaged: app.isPackaged
+      overlayVisible: subtitles.visible, engine: speech.status, pythonPid: speech.pid, mock, packaged: app.isPackaged,
+      session: speech.session
     })
     const refreshDisplays = (): ReturnType<WindowManager['displays']> => {
       const list = windows.displays(); windows.fitOverlay(); windows.send('displays:changed', list); broadcastConfig(); return list
     }
     const refreshTray = (): void => {
       if (!tray) return
-      const state = { idle: '未启动', starting: '正在加载模型…', loading: '正在加载模型…', ready: '就绪', running: '识别中', stopping: '正在停止…', stopped: '已停止', error: '出错' }[speech.status.state] || speech.status.state
+      const state = { idle: '未启动', starting: '正在加载模型…', loading: '正在加载模型…', ready: '就绪', running: '识别中', restarting: '异常退出，自动重启中…', stopping: '正在停止…', stopped: '已停止', error: '出错' }[speech.status.state] || speech.status.state
       const perform = (action: () => Promise<unknown>): void => { void action().catch(error => console.error('[action]', error)) }
       tray.setContextMenu(Menu.buildFromTemplate([
         { label: `状态：${state}`, enabled: false }, { type: 'separator' },
@@ -112,6 +113,8 @@ else {
         if (Object.hasOwn(patch, 'clickThrough')) windows.setClickThrough(next.clickThrough)
         subtitles.configChanged(previous)
         if (patch.asr && ['captureSource', 'audioDevice', 'audioOutputDevice'].some(key => Object.hasOwn(patch.asr!, key))) speech.switchCapture()
+        // 录制开关在识别运行中即时生效：否则本次识别会一直停在「等待录制会话就绪」。
+        if (patch.asr && Object.hasOwn(patch.asr, 'recordEnabled')) speech.setRecord(next.asr.recordEnabled)
         broadcastConfig(); refreshTray(); return config.load()
       },
       recording: kind => {
@@ -120,6 +123,24 @@ else {
         const resolved = path.resolve(file)
         if (path.dirname(resolved) !== path.resolve(dataDirectory) || path.extname(resolved).toLowerCase() !== '.wav') throw new Error('录音路径不在应用数据目录中')
         return fs.existsSync(resolved) ? fs.readFileSync(resolved).toString('base64') : null
+      },
+      // 录制目录只接受用户在本机对话框里选定的路径，不接受渲染层任意字符串。
+      chooseRecordingDir: async () => {
+        const current = config.load().asr.recordDir.trim()
+        const result = await dialog.showOpenDialog({
+          title: '选择语音与字幕录制存放文件夹',
+          defaultPath: current || path.join(dataDirectory, 'recordings'),
+          properties: ['openDirectory', 'createDirectory']
+        })
+        if (result.canceled || !result.filePaths.length) return null
+        return result.filePaths[0]
+      },
+      openRecordingDir: async () => {
+        const configured = config.load().asr.recordDir.trim()
+        const directory = configured || path.join(dataDirectory, 'recordings')
+        try { fs.mkdirSync(directory, { recursive: true }) } catch (error) { console.error('[record-dir]', error) }
+        const failure = await shell.openPath(directory)
+        return !failure
       },
       quit: () => app.quit()
     })
@@ -135,7 +156,7 @@ else {
       else if (!preventSleep && blocker !== null) { powerSaveBlocker.stop(blocker); blocker = null }
       refreshTray()
     })
-    for (const channel of ['audio:devices', 'audio:output-devices', 'audio:capture-switch', 'mic:test', 'record:result', 'record:level', 'recognize:result', 'env:state', 'install:progress']) {
+    for (const channel of ['audio:devices', 'audio:output-devices', 'audio:capture-switch', 'mic:test', 'record:result', 'record:level', 'recognize:result', 'env:state', 'install:progress', 'session']) {
       speech.on(channel, value => { windows.settings?.webContents.send(channel, value); refreshTray() })
     }
     windows.createOverlay()

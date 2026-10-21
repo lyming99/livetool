@@ -78,6 +78,8 @@ class FunAsrEngine:
         self._capture = None
         self._asr = None
         self._punc = None
+        # 会话录制器（由 Backend 注入）；None 表示本次不录制
+        self.recorder = None
         # 运行中切换采集来源：只换底层流，已加载的模型继续用
         self._switch_lock = threading.Lock()
         self._capture_version = 0
@@ -222,6 +224,7 @@ class FunAsrEngine:
     def _run(self, on_partial, on_final, on_status) -> None:
         import numpy as np
         from mf_stream import SwitchablePcmStream
+        from session_recorder import feed, mark_discontinuity
 
         stream = SwitchablePcmStream(self.audio_device, kind=self.capture_kind,
                                      sample_rate=SAMPLE_RATE, stop_event=self._stop)
@@ -244,10 +247,13 @@ class FunAsrEngine:
                 audio16 = stream.read(READ_FRAMES)
                 if not audio16.size:
                     break
+                # 真实语音分流给录制器（未开启录制时 recorder 为 None，零开销）
+                feed(self.recorder, audio16)
 
                 if self._capture_version != capture_version:
                     # 采集来源刚换过：上一路残留的音频与已拼的句子都不能带过来
                     capture_version = self._capture_version
+                    mark_discontinuity(self.recorder)
                     pending = np.zeros(0, dtype=np.float32)
                     buffer = ""
                     cache = {}
