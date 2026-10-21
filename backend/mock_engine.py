@@ -45,6 +45,11 @@ class MockEngine:
             self._thread.join(timeout=1.0)
             self._thread = None
 
+    def switch_capture(self, kind: str, device=None) -> dict:
+        """调试模式没有真实采集流：只回报来源，避免 switch_capture 命令报缺失方法。"""
+        return {"switched": False, "kind": kind, "device": device,
+                "label": "麦克风" if kind == "input" else "电脑声音"}
+
     def _run(self, on_partial, on_final) -> None:
         index = 0
         while not self._stop.is_set():

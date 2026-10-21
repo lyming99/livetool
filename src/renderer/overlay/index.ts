@@ -1,3 +1,6 @@
+import type { AppConfig } from '../../shared/config'
+import type { SubtitleState } from '../../shared/contracts'
+
 'use strict'
 
 /**
@@ -9,19 +12,19 @@
  * 描边只向外扩，字形完整，和 Qt 的 QPainterPath 是同一套思路。
  */
 
-const canvas = document.getElementById('subtitle')
-const ctx = canvas.getContext('2d')
+const canvas = document.getElementById('subtitle') as HTMLCanvasElement
+const ctx = canvas.getContext('2d')!
 
-let cfg = null
-let state = { final: '', partial: '' }
+let cfg: AppConfig | null = null
+let state: SubtitleState = { final: '', partial: '' }
 // 预览测试文字：非空时字幕层只画这段文字，识别结果暂时让位
 let preview = ''
 let dpr = 1
 // 上次量到的窗口尺寸：缩放率变化时 innerWidth/Height 可能不变，靠它判断是否需要重算
 let lastWidth = 0
 let lastHeight = 0
-let drag = null
-let autoLockTimer = null
+let drag: { startX:number; startY:number; anchorX:number; offsetY:number; dir:number } | null = null
+let autoLockTimer: ReturnType<typeof setTimeout> | undefined
 
 // 解锁后如果一直不操作，自动锁回去，避免全屏透明窗把鼠标一直挡住
 const AUTO_LOCK_MS = 30000
@@ -43,7 +46,7 @@ function resize () {
   draw()
 }
 
-function applyConfig (c) {
+function applyConfig (c: AppConfig) {
   cfg = c
   document.body.classList.toggle('unlocked', c.clickThrough === false)
   armAutoLock()
@@ -52,7 +55,7 @@ function applyConfig (c) {
 
 function armAutoLock () {
   clearTimeout(autoLockTimer)
-  autoLockTimer = null
+  autoLockTimer = undefined
   if (!cfg || cfg.clickThrough !== false) return
   autoLockTimer = setTimeout(() => {
     window.overlayAPI.setClickThrough(true)
@@ -61,12 +64,12 @@ function armAutoLock () {
 
 /* ---------------- 文本排版 ---------------- */
 
-function setFont (size) {
-  ctx.font = `${cfg.fontWeight} ${size}px ${cfg.fontFamily}`
+function setFont (size: number) {
+  ctx.font = `${cfg!.fontWeight} ${size}px ${cfg!.fontFamily}`
 }
 
 /** 按字符折行：中文逐字断，英文会在词中间断，后续可加词典优化 */
-function wrap (text, maxWidth) {
+function wrap (text: string, maxWidth: number) {
   const lines = []
   let line = ''
   for (const ch of text) {
@@ -87,7 +90,7 @@ function wrap (text, maxWidth) {
   return lines
 }
 
-function widest (lines) {
+function widest (lines: string[]) {
   let max = 0
   for (const line of lines) {
     const w = ctx.measureText(line).width
@@ -100,25 +103,26 @@ function widest (lines) {
 
 function draw () {
   if (!cfg) return
+  const config = cfg
 
   const W = window.innerWidth
   const H = window.innerHeight
   ctx.clearRect(0, 0, W, H)
 
-  const anchor = typeof cfg.anchorX === 'number' ? cfg.anchorX : 0.5
+  const anchor = typeof config.anchorX === 'number' ? config.anchorX : 0.5
   const cx = W * anchor
 
   // 字幕以锚点为中心展开，宽度同时受配置比例和「离最近屏幕边缘的距离」限制，
   // 否则拖到边上时文字会被裁掉
   const sideRoom = Math.max(60, Math.min(cx, W - cx))
-  const maxW = Math.max(120, Math.min(W * cfg.widthRatio, sideRoom * 2))
+  const maxW = Math.max(120, Math.min(W * config.widthRatio, sideRoom * 2))
 
-  const baseSize = Math.max(8, cfg.fontSize)
+  const baseSize = Math.max(8, config.fontSize)
 
   // 字号自适应：最长一行超宽时整体缩小，最多缩到 60%
   let size = baseSize
-  let finalLines = []
-  let partialLines = []
+  let finalLines: string[] = []
+  let partialLines: string[] = []
   setFont(size)
 
   const relayout = () => {
@@ -129,7 +133,7 @@ function draw () {
       return
     }
     finalLines = state.final ? wrap(state.final, maxW) : []
-    partialLines = (cfg.showPartial && state.partial) ? wrap(state.partial, maxW) : []
+    partialLines = (config.showPartial && state.partial) ? wrap(state.partial, maxW) : []
   }
   relayout()
 
@@ -145,35 +149,35 @@ function draw () {
   for (const t of finalLines) rows.push({ text: t, draft: false })
   for (const t of partialLines) rows.push({ text: t, draft: true })
 
-  const maxLines = Math.max(1, Math.round(cfg.maxLines))
+  const maxLines = Math.max(1, Math.round(config.maxLines))
   const shown = rows.slice(-maxLines)
   if (!shown.length) return
 
-  const lineH = size * 1.28 + cfg.lineGap
-  const blockH = shown.length * lineH - cfg.lineGap
+  const lineH = size * 1.28 + config.lineGap
+  const blockH = shown.length * lineH - config.lineGap
 
   let top
-  if (cfg.position === 'top') {
-    top = cfg.offsetY
+  if (config.position === 'top') {
+    top = config.offsetY
   } else {
-    top = H - cfg.offsetY - blockH
+    top = H - config.offsetY - blockH
   }
 
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.lineJoin = 'round'
   ctx.miterLimit = 2
-  ctx.lineWidth = Math.max(0, cfg.strokeWidth)
-  ctx.strokeStyle = cfg.strokeColor
-  ctx.fillStyle = cfg.color
+  ctx.lineWidth = Math.max(0, config.strokeWidth)
+  ctx.strokeStyle = config.strokeColor
+  ctx.fillStyle = config.color
 
-  const baseAlpha = typeof cfg.opacity === 'number' ? cfg.opacity : 1
+  const baseAlpha = typeof config.opacity === 'number' ? config.opacity : 1
 
   shown.forEach((row, i) => {
     const cy = top + i * lineH + lineH / 2
     // 草稿行半透明，让「还没定稿」这件事一眼可辨
     ctx.globalAlpha = baseAlpha * (row.draft ? 0.62 : 1)
-    if (cfg.strokeWidth > 0) ctx.strokeText(row.text, cx, cy)
+    if (config.strokeWidth > 0) ctx.strokeText(row.text, cx, cy)
     ctx.fillText(row.text, cx, cy)
   })
   ctx.globalAlpha = 1
@@ -181,7 +185,7 @@ function draw () {
 
 /* ---------------- 交互：解锁后可自由拖动位置 ---------------- */
 
-function clamp (v, lo, hi) {
+function clamp (v: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, v))
 }
 
@@ -224,18 +228,18 @@ window.addEventListener('dblclick', () => {
 
 window.addEventListener('resize', resize)
 
-window.overlayAPI.onSubtitle((s) => {
+const stopSubtitle = window.overlayAPI.onSubtitle((s) => {
   state = { final: s.final || '', partial: s.partial || '' }
   draw()
 })
 
-window.overlayAPI.onPreview((text) => {
+const stopPreview = window.overlayAPI.onPreview((text) => {
   preview = typeof text === 'string' ? text : ''
   draw()
 })
 
 // 缩放率变化时 devicePixelRatio 会变但 innerWidth 可能不变，必须显式重新量一次
-window.overlayAPI.onMetrics(() => {
+const stopMetrics = window.overlayAPI.onMetrics(() => {
   const w = window.innerWidth
   const h = window.innerHeight
   const nextDpr = window.devicePixelRatio || 1
@@ -245,9 +249,12 @@ window.overlayAPI.onMetrics(() => {
   resize()
 })
 
-window.overlayAPI.onConfig((c) => applyConfig(c))
+const stopConfig = window.overlayAPI.onConfig((c) => applyConfig(c))
 
 window.overlayAPI.getConfig().then((c) => {
   applyConfig(c)
   resize()
 })
+
+const dispose = (): void => { stopSubtitle(); stopPreview(); stopMetrics(); stopConfig(); clearTimeout(autoLockTimer) }
+window.addEventListener("beforeunload", dispose, { once:true })

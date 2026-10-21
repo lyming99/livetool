@@ -28,6 +28,53 @@ agent工具(个人产品，打个广告)：[wenzflow](https://wenzflow.com)
 - [ ] macOS
 - [ ] Linux
 
+## 开发与架构
+
+当前使用 **Electron + TypeScript + React + electron-vite / Vite**。设置页按功能组件化，字幕层保留独立 Canvas，Python 识别后端和 C++ 原生采集器保留。
+
+代码入口位于 `src/main/index.ts`，不再直接编辑旧的根目录 `electron/`、`renderer/` 脚本。模块职责、进程通路、配置迁移和安全边界见 `docs/architecture.md`。
+
+### 环境与启动
+
+- Node.js **22.12 或更高版本**（本次本机验证使用 Node 24）。
+- 源码运行使用本机 Python；真实识别仍需要原有 ASR/音频依赖与模型。
+- Windows 原生采集组件可通过 `npm run build:audio` 构建，需本机 C++ 构建环境。
+
+```bash
+npm ci
+npm run dev        # Vite 开发服务；使用 mock 识别，不自动打开麦克风
+npm start          # 先构建，再启动真实识别模式；识别仍需手动点击开始
+```
+
+### 验证
+
+```bash
+npm run typecheck
+npm test           # TypeScript 模块回归 + Python 假设备回归
+npm run check      # 再包含真实 Electron 设置页、播放和完整应用 mock 冒烟
+npm run test:dev    # 开发服务双窗口与 IPC 冒烟
+```
+
+这些自动化测试不需要说话、不加载真实识别模型，也不调用付费转写 API；使用独立临时用户数据，不覆盖现有配置或录音。
+
+### 打包
+
+```bash
+npm run build:backend   # 沿用原有后端及原生组件构建流程
+npm run dist            # 构建 TypeScript/React，并生成 Windows NSIS 安装包
+```
+
+开发构建输出在 `out/`，常规安装包输出在 `dist/`。只更改桌面代码时可复用已构建后端；修改 Python/native 后应重新构建后端再打包。API Key 的旧明文配置会在下一次成功保存时迁移为本机系统加密密文。
+
+本轮另存的安装包在 `dist/framework/livetool-0.1.8-setup.exe`，没有覆盖原 `dist/` 根下的既有安装包。源码/开发/打包 EXE 的验收范围与限制见 `docs/verification.md`。
+
+对常规打包目录可额外执行完整应用冒烟（使用 mock，不启动麦克风）：
+
+```bash
+npm run pack
+node tools/test_app_smoke.js --packaged=dist/win-unpacked/livetool.exe
+```
+
 ## 界面截图
 
 ![Pasted image](assets/pasted-image-1792299695047121.png "Pasted image")

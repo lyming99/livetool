@@ -8,14 +8,15 @@ const assert = require('node:assert/strict')
 
 const ROOT = path.join(__dirname, '..')
 const packaged = process.argv.includes('--packaged-ui')
-const APP_ROOT = packaged ? path.join(ROOT, 'dist', 'win-unpacked', 'resources', 'app.asar') : ROOT
+const packageDir = process.argv.find(arg => arg.startsWith('--package-dir='))
+const APP_ROOT = packaged ? path.join(packageDir ? path.resolve(ROOT, packageDir.slice('--package-dir='.length)) : path.join(ROOT, 'dist', 'win-unpacked'), 'resources', 'app.asar') : ROOT
 const captureArg = process.argv.find(arg => arg.startsWith('--capture='))
 const topCaptureArg = process.argv.find(arg => arg.startsWith('--capture-top='))
 const modeCaptureArg = process.argv.find(arg => arg.startsWith('--capture-mode='))
 fs.mkdirSync(path.join(ROOT, 'build'), { recursive: true })
 const temp = fs.mkdtempSync(path.join(ROOT, 'build', 'audio-settings-ui-'))
 app.setPath('userData', temp)
-const { DEFAULTS } = require(path.join(APP_ROOT, 'electron', 'config.js'))
+const DEFAULTS = require('../src/shared/defaults.json')
 let cfg = JSON.parse(JSON.stringify(DEFAULTS))
 let win
 let recording = false
@@ -90,13 +91,17 @@ app.whenReady().then(async () => {
     win = new BrowserWindow({
       show: false, width: 720, height: 900,
       webPreferences: {
-        preload: path.join(APP_ROOT, 'electron', 'preload-settings.js'),
+        preload: path.join(APP_ROOT, 'out', 'preload', 'settings.js'),
         contextIsolation: true, nodeIntegration: false
       }
     })
     win.webContents.on('preload-error', (_event, _file, err) => errors.push(String(err)))
-    await win.loadFile(path.join(APP_ROOT, 'renderer', 'settings.html'))
-    await waitFor("document.getElementById('audioDevice').options.length === 3")
+    await win.loadFile(path.join(APP_ROOT, 'out', 'renderer', 'settings.html'))
+    await waitFor("document.getElementById('audioDevice') && document.getElementById('audioDevice').options.length === 3")
+    await win.webContents.executeJavaScript(`window.__setControlValue = (element, value) => {
+      const prototype = element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLSelectElement.prototype
+      Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, value)
+    }; undefined`)
 
     const subtitleLayout = await win.webContents.executeJavaScript(`(() => {
       const content = document.querySelector('.content')
@@ -174,14 +179,14 @@ app.whenReady().then(async () => {
     // 切到电脑声音输出：标签、提示与设备列表都换成扬声器
     await win.webContents.executeJavaScript(`(() => {
       const source = document.getElementById('captureSource')
-      source.value = 'output'
-      source.dispatchEvent(new Event('change'))
+      window.__setControlValue(source, 'output')
+      source.dispatchEvent(new Event('change', { bubbles: true }))
     })()`)
     await waitFor("document.getElementById('audioDeviceLabel').textContent === '扬声器'")
     const captureOutput = await win.webContents.executeJavaScript(`(() => {
       const device = document.getElementById('audioDevice')
       return {
-        source: cfg.asr.captureSource,
+        source: document.getElementById('captureSource').value,
         label: document.getElementById('audioDeviceLabel').textContent,
         deviceValues: [...device.options].map(option => option.value),
         hint: document.getElementById('captureSourceHint').textContent
@@ -195,11 +200,11 @@ app.whenReady().then(async () => {
     // 切回麦克风，设备列表恢复
     await win.webContents.executeJavaScript(`(() => {
       const source = document.getElementById('captureSource')
-      source.value = 'input'
-      source.dispatchEvent(new Event('change'))
+      window.__setControlValue(source, 'input')
+      source.dispatchEvent(new Event('change', { bubbles: true }))
     })()`)
     await waitFor("document.getElementById('audioDeviceLabel').textContent === '麦克风'")
-    assert.equal(await win.webContents.executeJavaScript('cfg.asr.captureSource'), 'input')
+    assert.equal(await win.webContents.executeJavaScript("document.getElementById('captureSource').value"), 'input')
 
     // 显示方式：默认实时，此时草稿行开关可用、定稿延时说明不生效
     const modeDefaults = await win.webContents.executeJavaScript(`(() => {
@@ -226,11 +231,11 @@ app.whenReady().then(async () => {
     // 切到整句定稿模式：草稿行开关禁用，延时输入启用，配置落盘
     await win.webContents.executeJavaScript(`(() => {
       const mode = document.getElementById('subtitleMode')
-      mode.value = 'sentence'
-      mode.dispatchEvent(new Event('change'))
+      window.__setControlValue(mode, 'sentence')
+      mode.dispatchEvent(new Event('change', { bubbles: true }))
       const delay = document.getElementById('sentenceDelay')
-      delay.value = '300'
-      delay.dispatchEvent(new Event('input'))
+      window.__setControlValue(delay, '300')
+      delay.dispatchEvent(new Event('input', { bubbles: true }))
     })()`)
     await pause(250)
     const modeSentence = await win.webContents.executeJavaScript(`(() => {
@@ -274,14 +279,18 @@ app.whenReady().then(async () => {
 
     await win.webContents.executeJavaScript(`(() => {
       const engine = document.getElementById('asrEngine')
-      engine.value = 'api'
-      engine.dispatchEvent(new Event('change'))
-      document.getElementById('apiBaseUrl').value = 'https://api.test/v1'
-      document.getElementById('apiBaseUrl').dispatchEvent(new Event('change'))
-      document.getElementById('apiModel').value = 'whisper-1'
-      document.getElementById('apiModel').dispatchEvent(new Event('change'))
-      document.getElementById('apiTimeout').value = '45'
-      document.getElementById('apiTimeout').dispatchEvent(new Event('change'))
+      window.__setControlValue(engine, 'api')
+      engine.dispatchEvent(new Event('change', { bubbles: true }))
+      window.__setControlValue(document.getElementById('apiBaseUrl'), 'https://api.test/v1')
+      document.getElementById('apiBaseUrl').dispatchEvent(new Event('change', { bubbles: true }))
+      window.__setControlValue(document.getElementById('apiModel'), 'whisper-1')
+      document.getElementById('apiModel').dispatchEvent(new Event('change', { bubbles: true }))
+      window.__setControlValue(document.getElementById('apiTimeout'), '45')
+      document.getElementById('apiTimeout').dispatchEvent(new Event('change', { bubbles: true }))
+      // 新行为：选「常用模型」下拉里的预设，应直接写入接口模型输入框
+      const preset = document.getElementById('apiModelPreset')
+      window.__setControlValue(preset, 'gpt-4o-transcribe')
+      preset.dispatchEvent(new Event('change', { bubbles: true }))
     })()`)
     await pause(300)
 
@@ -292,14 +301,19 @@ app.whenReady().then(async () => {
         visible: style.display !== 'none',
         activeBlocks: [...document.querySelectorAll('.engine-block.active')]
           .map(node => node.dataset.engine),
-        hasFields: ['apiBaseUrl', 'apiKey', 'apiModel', 'apiLanguage', 'apiPrompt', 'apiTimeout']
+        hasFields: ['apiBaseUrl', 'apiKey', 'apiModel', 'apiLanguage', 'apiPrompt', 'apiTimeout',
+          'apiModelPreset', 'apiModelHint']
           .every(id => !!document.getElementById(id)),
+        presetOptions: [...document.querySelectorAll('#apiModelPreset option')].map(o => o.value),
+        presetGroups: [...document.querySelectorAll('#apiModelPreset optgroup')].map(g => g.label),
+        modelAfterPreset: document.getElementById('apiModel').value,
+        hintAfterPreset: document.getElementById('apiModelHint').textContent,
         languageOptions: [...document.getElementById('apiLanguage').options].map(o => o.value),
         installHint: document.getElementById('installHint').textContent,
         installButton: document.getElementById('btnInstall').textContent.trim(),
-        engine: cfg.asr.engine,
-        baseUrl: cfg.asr.apiBaseUrl,
-        timeout: cfg.asr.apiTimeout
+        engine: document.getElementById('asrEngine').value,
+        baseUrl: document.getElementById('apiBaseUrl').value,
+        timeout: Number(document.getElementById('apiTimeout').value)
       }
     })()`)
     assert.equal(apiBlock.visible, true)
@@ -311,17 +325,71 @@ app.whenReady().then(async () => {
     assert.equal(apiBlock.engine, 'api')
     assert.equal(apiBlock.baseUrl, 'https://api.test/v1')
     assert.equal(apiBlock.timeout, 45)
+    // 常用模型下拉：分组预设 + 自定义项，选中后面板输入框与提示同步
+    assert.deepEqual(apiBlock.presetGroups, ['OpenAI', '硅基流动 / 兼容网关', '本地 whisper 服务'])
+    assert.deepEqual(apiBlock.presetOptions, [
+      'whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe',
+      'FunAudioLLM/SenseVoiceSmall', 'FunAudioLLM/SenseVoiceLarge',
+      'whisper-large-v3', 'whisper-small', 'whisper-base', '__custom__'
+    ])
+    assert.equal(apiBlock.modelAfterPreset, 'gpt-4o-transcribe')
+    assert.match(apiBlock.hintAfterPreset, /预设模型 gpt-4o-transcribe/)
     console.log('API ENGINE BLOCK PASS')
+
+    // A controlled number field must keep an intermediate 1 while the user types 12.
+    await win.webContents.executeJavaScript(`(() => {
+      const input = document.getElementById('apiTimeout')
+      input.focus()
+      window.__setControlValue(input, '1')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })()`)
+    await pause(100)
+    assert.equal(await win.webContents.executeJavaScript("document.getElementById('apiTimeout').value"), '1')
+    assert.equal(cfg.asr.apiTimeout, 45)
+    await win.webContents.executeJavaScript(`(() => {
+      const input = document.getElementById('apiTimeout')
+      window.__setControlValue(input, '12')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })()`)
+    await pause(150)
+    assert.equal(cfg.asr.apiTimeout, 12)
+    await win.webContents.executeJavaScript(`(() => {
+      const input = document.getElementById('apiTimeout')
+      window.__setControlValue(input, '45')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.blur()
+    })()`)
+    await pause(150)
+    assert.equal(cfg.asr.apiTimeout, 45)
+    console.log('REACT INTERMEDIATE NUMBER INPUT PASS')
+
+    // 自定义模型名：输入框改值后下拉自动落到「自定义模型名…」，提示改为自定义
+    const apiCustom = await win.webContents.executeJavaScript(`(async () => {
+      const input = document.getElementById('apiModel')
+      window.__setControlValue(input, 'my-own-whisper')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      return {
+        preset: document.getElementById('apiModelPreset').value,
+        hint: document.getElementById('apiModelHint').textContent
+      }
+    })()`)
+    await pause(200)
+    assert.equal(apiCustom.preset, '__custom__')
+    assert.match(apiCustom.hint, /自定义模型 my-own-whisper/)
+    assert.equal(cfg.asr.apiModel, 'my-own-whisper')
+    console.log('API MODEL PRESET PASS')
 
     // 切回本地引擎：区块收起，按钮文案恢复
     await win.webContents.executeJavaScript(`(() => {
       const engine = document.getElementById('asrEngine')
-      engine.value = 'funasr'
-      engine.dispatchEvent(new Event('change'))
+      window.__setControlValue(engine, 'funasr')
+      engine.dispatchEvent(new Event('change', { bubbles: true }))
     })()`)
     await pause(200)
     const backToLocal = await win.webContents.executeJavaScript(`(() => ({
-      engine: cfg.asr.engine,
+      engine: document.getElementById('asrEngine').value,
       activeBlocks: [...document.querySelectorAll('.engine-block.active')].map(node => node.dataset.engine),
       installButton: document.getElementById('btnInstall').textContent.trim()
     }))()`)
@@ -331,8 +399,8 @@ app.whenReady().then(async () => {
 
     await win.webContents.executeJavaScript(`(() => {
       const select = document.getElementById('audioDevice')
-      select.value = 'ui-selected'
-      select.dispatchEvent(new Event('change'))
+      window.__setControlValue(select, 'ui-selected')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
       document.getElementById('btnRecordTest').click()
     })()`)
     await waitFor("document.getElementById('btnRecordTest').textContent === '停止录制'")

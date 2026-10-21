@@ -19,6 +19,15 @@ from mf_capture import CaptureError, helper_path, resolve_device, _options
 BACKENDS = {"input": "mediafoundation", "output": "wasapi-loopback"}
 
 
+def drain_queue(target) -> None:
+    """Discard audio buffered from the previous capture source."""
+    while True:
+        try:
+            target.get_nowait()
+        except queue.Empty:
+            return
+
+
 class PcmInputStream:
     def __init__(self, device=None, *, kind="input", sample_rate=16000, stop_event=None,
                  on_level=None, executable=None, popen_factory=None, queue_limit=512):
@@ -223,3 +232,161 @@ class PcmInputStream:
 
     def __exit__(self, *_):
         self.close()
+
+
+class SwitchablePcmStream:
+    """长活的 16k PCM 流，可在不重载模型的前提下换掉底层采集来源。
+
+    识别线程只调用 read()；切换时（麦克风 <-> 电脑声音，或同类换设备）先打开
+    新流、再原子换指针并关掉旧流，让正在进行的 read() 自动续到新流上。
+    代价只有换源瞬间的一小段静音（通常不到 1 秒）。
+    """
+
+    def __init__(self, device=None, *, kind="input", sample_rate=16000, stop_event=None,
+                 executable=None, popen_factory=None, queue_limit=512):
+        if kind not in BACKENDS:
+            raise CaptureError("未知的音频来源类型")
+        self.kind = kind
+        self.device = device
+        self.sample_rate = int(sample_rate)
+        self._cancel = stop_event or threading.Event()
+        self._executable = executable
+        self._spawn = popen_factory
+        self._queue_limit = queue_limit
+        self._lock = threading.Lock()
+        self._stream = None
+        self._generation = 0
+        self._closed = False
+        self.switches = 0
+
+    @property
+    def label(self) -> str:
+        return "麦克风" if self.kind == "input" else "电脑声音"
+
+    def _make(self, kind, device):
+        options = {
+            "kind": kind,
+            "sample_rate": self.sample_rate,
+            "stop_event": self._cancel,
+        }
+        # 只在非默认队列长度时才传，保持与直接构造 PcmInputStream 相同的调用形态
+        if self._queue_limit != 512:
+            options["queue_limit"] = self._queue_limit
+        if self._executable is not None:
+            options["executable"] = self._executable
+        if self._spawn is not None:
+            options["popen_factory"] = self._spawn
+        return PcmInputStream(device, **options)
+
+    def start(self):
+        with self._lock:
+            if self._closed:
+                raise CaptureError("原生采集已关闭")
+            if self._stream is not None:
+                raise CaptureError("原生采集实例不能重复启动")
+            stream = self._make(self.kind, self.device)
+        try:
+            stream.start()
+        except BaseException:
+            # 底层流自己启动失败时不会 close，交给这里回收，避免引擎侧留下悬挂句柄
+            stream.close()
+            raise
+        with self._lock:
+            if self._closed or self._cancel.is_set():
+                stream.close()
+                raise CaptureError("原生采集已取消")
+            self._stream = stream
+            self._generation += 1
+        return self
+
+    def read(self, frames):
+        import numpy as np
+
+        if not isinstance(frames, int) or frames <= 0:
+            raise ValueError("frames must be a positive integer")
+        while True:
+            with self._lock:
+                stream, generation = self._stream, self._generation
+                closed = self._closed
+            if stream is None or closed or self._cancel.is_set():
+                return np.empty(0, dtype=np.float32)
+            audio = stream.read(frames)
+            with self._lock:
+                swapped = self._generation != generation
+                alive = not self._closed and self._stream is not None
+            if self._cancel.is_set() or not alive:
+                return np.empty(0, dtype=np.float32)
+            if swapped:
+                # 这次读到的是上一个来源的残留数据，丢掉后直接续到新流
+                continue
+            if not audio.size:
+                return audio
+            return audio
+
+    def switch(self, kind, device=None):
+        """换采集来源；返回 True 表示确实换了（False = 设置没变化）。"""
+        if kind not in BACKENDS:
+            raise CaptureError("未知的音频来源类型")
+        with self._lock:
+            if self._closed:
+                raise CaptureError("原生采集已关闭")
+            if kind == self.kind and device == self.device:
+                return False
+
+        # 先开新流：新设备打不开时抛错，旧流继续工作，不会把识别搞停
+        new = self._make(kind, device)
+        new.start()
+        with self._lock:
+            if self._closed:
+                new.close()
+                raise CaptureError("原生采集已关闭")
+            old = self._stream
+            self._stream = new
+            self.kind = kind
+            self.device = device
+            self._generation += 1
+            self.switches += 1
+        if old is not None:
+            old.close()
+        return True
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            stream, self._stream = self._stream, None
+            self._generation += 1
+        if stream is not None:
+            stream.close()
+
+
+def switch_engine_capture(engine, kind, device=None) -> dict:
+    """三个引擎共用的切换逻辑：换底层采集流，模型与识别线程保持不变。
+
+    切换成功后引擎的 capture_kind / audio_device / capture_label 立即更新，
+    并递增 _capture_version；识别线程据此清掉上一来源残留的缓冲，
+    避免把麦克风与电脑声音的音频拼成同一句。
+    """
+    if kind not in BACKENDS:
+        raise CaptureError("未知的音频来源类型")
+    with engine._switch_lock:
+        stream = getattr(engine, "_capture", None)
+        if stream is None:
+            raise CaptureError("识别尚未开始采集，切换会在下次开始时生效")
+        if not isinstance(stream, SwitchablePcmStream):
+            raise CaptureError("当前采集流不支持运行中切换，请重新加载模型")
+        changed = stream.switch(kind, device)
+        if not changed:
+            return {"switched": False, "kind": engine.capture_kind,
+                    "device": engine.audio_device, "label": engine.capture_label}
+        engine.capture_kind = kind
+        engine.audio_device = device
+        engine.capture_label = "麦克风" if kind == "input" else "电脑声音"
+        engine._capture_version += 1
+        queue_ref = getattr(engine, "_audio_q", None)
+    # 队列在锁外清，避免与采集线程的 put 争锁
+    if queue_ref is not None:
+        drain_queue(queue_ref)
+    return {"switched": True, "kind": kind, "device": device,
+            "label": engine.capture_label}

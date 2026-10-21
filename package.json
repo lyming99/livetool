@@ -1,16 +1,28 @@
 {
   "name": "livetool",
-  "version": "0.1.6",
+  "version": "0.1.9",
   "description": "Windows 直播实时语音字幕悬浮窗",
-  "main": "electron/main.js",
+  "main": "out/main/index.js",
   "private": true,
   "author": "livetool",
   "scripts": {
-    "start": "electron .",
-    "dev": "electron . --dev",
+    "start": "npm run build && electron .",
+    "dev": "electron-vite dev",
     "build:backend": "npm run build:audio && python tools/patch_funasr.py && python -m PyInstaller tools/backend.spec --noconfirm --distpath build --workpath build/tmp",
-    "dist": "electron-builder --win nsis",
-    "build:audio": "tools\\build_audio_capture.cmd"
+    "dist": "npm run build && electron-builder --win nsis",
+    "build:audio": "tools\\build_audio_capture.cmd",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && electron-vite build",
+    "pack": "npm run build && electron-builder --win --dir",
+    "test": "npm run test:unit && npm run test:backend",
+    "test:unit": "vitest run",
+    "test:backend": "python tools/run_backend_tests.py",
+    "test:ui": "npm run build && electron tools/test_audio_settings_ui.js",
+    "test:playback": "npm run build && electron tools/test_recording_playback.js",
+    "check": "npm run build && npm test && electron tools/test_audio_settings_ui.js && electron tools/test_recording_playback.js && node tools/test_app_smoke.js",
+    "test:smoke": "npm run build && node tools/test_app_smoke.js",
+    "test:dev": "node tools/test_app_smoke.js --dev"
   },
   "build": {
     "appId": "com.livetool.subtitle",
@@ -21,8 +33,7 @@
       "buildResources": "assets"
     },
     "files": [
-      "electron/**/*",
-      "renderer/**/*",
+      "out/**/*",
       "assets/icon.png",
       "package.json"
     ],
@@ -57,7 +68,23 @@
     }
   },
   "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
     "electron": "^38.0.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^6.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.7",
+    "vitest": "^3.2.7"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zod": "^4.6.7"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

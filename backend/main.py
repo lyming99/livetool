@@ -601,6 +601,39 @@ class Backend:
         emit({"type": "install", "phase": "done", "ok": ok, "engine": engine})
         self.check_env(engine)
 
+    def switch_capture(self, config: dict | None = None) -> None:
+        """运行中切换采集来源：只重建底层音频流，已加载的模型继续用。"""
+        with self._lock:
+            if config:
+                self.asr_config = dict(config)
+            cfg = dict(self.asr_config)
+            engine = self.engine
+            running = self.running
+        try:
+            from audio_devices import capture_target
+            target = capture_target(cfg)
+        except Exception as exc:
+            emit({"type": "capture_switch", "ok": False,
+                  "detail": f"无法解析采集设备：{exc}"})
+            return
+        if not running or engine is None:
+            # 没有在跑就只更新配置，下次 start 会直接用新来源
+            emit({"type": "capture_switch", "ok": True, "applied": False,
+                  "kind": target["kind"], "device": target["device"],
+                  "label": target["label"],
+                  "detail": "识别未运行，采集来源已保存，下次开始时生效"})
+            return
+        try:
+            info = engine.switch_capture(target["kind"], target["device"])
+        except Exception as exc:
+            log("switch capture failed:", repr(exc))
+            emit({"type": "capture_switch", "ok": False,
+                  "kind": target["kind"], "label": target["label"],
+                  "detail": f"切换失败：{exc}"})
+            return
+        emit({"type": "capture_switch", "ok": True,
+              "applied": bool(info.get("switched")), **info})
+
     def stop(self) -> None:
         self.stop_record()
         with self._lock:
@@ -682,6 +715,8 @@ def stdin_loop(backend: Backend) -> None:
             backend.stop_record()
         elif kind == "check_env":
             backend.check_env(cmd.get("engine"), cmd.get("asr"))
+        elif kind == "switch_capture":
+            backend.switch_capture(cmd.get("asr"))
         elif kind == "install":
             backend.install(cmd.get("engine"), cmd.get("asr"))
         elif kind == "stop":

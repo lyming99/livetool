@@ -100,6 +100,30 @@ def _multipart(fields: list[tuple[str, str]], content: bytes, boundary: str) -> 
     return b"".join(chunks)
 
 
+# 接口模型能力差异：多数兼容实现接受 temperature；OpenAI 的 gpt-4o-transcribe 系列
+# 与 SenseVoice 一类模型不接受该参数（会返回 400），这里按模型名做保守裁剪。
+NO_TEMPERATURE_HINTS = ("gpt-4o-transcribe", "gpt-4o-mini-transcribe", "sensevoice")
+
+# 400 报「不支持的参数」时，允许去掉后重试的可选字段；model / file 永远不能去
+RETRYABLE_FIELDS = ("temperature", "response_format", "prompt", "language")
+
+
+def _supports_temperature(model: str) -> bool:
+    name = (model or "").lower()
+    return not any(hint in name for hint in NO_TEMPERATURE_HINTS)
+
+
+def _rejected_field(detail: str, present) -> str | None:
+    """从 400 的错误正文里判断是哪个可选字段被拒（用于去掉该字段重试）。"""
+    text = (detail or "").lower()
+    if not text:
+        return None
+    for name in RETRYABLE_FIELDS:
+        if name in text and name in present:
+            return name
+    return None
+
+
 class ApiEngine:
     def __init__(self, config: dict | None = None, models_dir: str = "") -> None:
         cfg = config or {}
@@ -128,6 +152,9 @@ class ApiEngine:
         self._capture = None
         self._audio_q: queue.Queue = queue.Queue(maxsize=200)
         self.requests = 0
+        # 运行中切换采集来源：只换底层流，接口配置保持不变
+        self._switch_lock = threading.Lock()
+        self._capture_version = 0
 
     # ---- 接口信息 ----
 
@@ -175,20 +202,22 @@ class ApiEngine:
 
     # ---- 请求 ----
 
-    def _transcribe(self, audio) -> str:
-        payload = _wav_bytes(audio)
-        fields = [
-            ("model", self.model),
-            ("response_format", "json"),
-            ("temperature", "0"),
-        ]
-        if self.language and self.language != "auto":
+    def _build_fields(self, optional: set) -> list[tuple[str, str]]:
+        """按模型能力拼 multipart 字段；optional 里是仍允许发送的可选字段。"""
+        fields = [("model", self.model)]
+        if "response_format" in optional:
+            fields.append(("response_format", "json"))
+        if "temperature" in optional and _supports_temperature(self.model):
+            fields.append(("temperature", "0"))
+        if "language" in optional and self.language and self.language != "auto":
             fields.append(("language", self.language))
-        if self.prompt:
+        if "prompt" in optional and self.prompt:
             fields.append(("prompt", self.prompt))
+        return fields
 
+    def _transcribe_once(self, payload: bytes, optional: set) -> bytes:
         boundary = "----livetool" + uuid.uuid4().hex
-        body = _multipart(fields, payload, boundary)
+        body = _multipart(self._build_fields(optional), payload, boundary)
         request = urllib.request.Request(self.endpoint, data=body, method="POST")
         request.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
         request.add_header("Accept", "application/json")
@@ -196,21 +225,31 @@ class ApiEngine:
             request.add_header("Authorization", f"Bearer {self.api_key}")
 
         self.requests += 1
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read()
-        except urllib.error.HTTPError as exc:
-            try:
-                detail = exc.read().decode("utf-8", "replace")
-            except Exception:
-                detail = ""
-            raise RuntimeError(_http_message(exc.code, detail)) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"无法连接接口：{exc.reason}") from exc
-        except TimeoutError as exc:
-            raise RuntimeError(f"接口请求超时（{self.timeout} 秒）") from exc
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            return response.read()
 
-        return self._parse(raw)
+    def _transcribe(self, audio) -> str:
+        payload = _wav_bytes(audio)
+        # 可选字段逐个尝试：某个不支持就按 400 的提示去掉再重试，最多 3 轮
+        optional = set(RETRYABLE_FIELDS)
+        for attempt in range(3):
+            try:
+                raw = self._transcribe_once(payload, optional)
+            except urllib.error.HTTPError as exc:
+                try:
+                    detail = exc.read().decode("utf-8", "replace")
+                except Exception:
+                    detail = ""
+                rejected = _rejected_field(detail, optional | {"model"})
+                if exc.code == 400 and rejected and attempt < 2:
+                    optional.discard(rejected)
+                    continue
+                raise RuntimeError(_http_message(exc.code, detail)) from exc
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"无法连接接口：{exc.reason}") from exc
+            except TimeoutError as exc:
+                raise RuntimeError(f"接口请求超时（{self.timeout} 秒）") from exc
+            return self._parse(raw)
 
     @staticmethod
     def _parse(raw: bytes) -> str:
@@ -238,11 +277,17 @@ class ApiEngine:
 
     # ---- 采集与识别 ----
 
-    def _read_loop(self, on_status) -> None:
-        from mf_stream import PcmInputStream
+    def switch_capture(self, kind: str, device=None) -> dict:
+        """运行中切换采集来源（麦克风 <-> 电脑声音），接口配置保持不变。"""
+        from mf_stream import switch_engine_capture
 
-        stream = PcmInputStream(self.audio_device, kind=self.capture_kind,
-                                sample_rate=SAMPLE_RATE, stop_event=self._stop)
+        return switch_engine_capture(self, kind, device)
+
+    def _read_loop(self, on_status) -> None:
+        from mf_stream import SwitchablePcmStream
+
+        stream = SwitchablePcmStream(self.audio_device, kind=self.capture_kind,
+                                     sample_rate=SAMPLE_RATE, stop_event=self._stop)
         self._capture = stream
         try:
             stream.start()
@@ -279,11 +324,22 @@ class ApiEngine:
         pending = np.zeros(0, dtype=np.float32)     # 当前整句，用于定稿
         silence = 0.0
         last_partial = 0.0
+        capture_version = self._capture_version
 
         window_samples = int(SAMPLE_RATE * PARTIAL_WINDOW)
         max_samples = int(SAMPLE_RATE * MAX_UTTERANCE)
 
         while not self._stop.is_set():
+            if self._capture_version != capture_version:
+                # 采集来源刚换过：上一路残留的音频不能拼进新来源的句子
+                capture_version = self._capture_version
+                buffer = np.zeros(0, dtype=np.float32)
+                pending = np.zeros(0, dtype=np.float32)
+                silence = 0.0
+                last_partial = 0.0
+                on_partial("")
+                on_status("running", f"{CAPTURE_STATUS[self.capture_kind]} · 接口转写")
+
             try:
                 audio = self._audio_q.get(timeout=0.2)
             except queue.Empty:

@@ -78,6 +78,9 @@ class FunAsrEngine:
         self._capture = None
         self._asr = None
         self._punc = None
+        # 运行中切换采集来源：只换底层流，已加载的模型继续用
+        self._switch_lock = threading.Lock()
+        self._capture_version = 0
 
     # ---- 日志 ----
 
@@ -210,12 +213,18 @@ class FunAsrEngine:
 
     # ---- 采集与识别 ----
 
+    def switch_capture(self, kind: str, device=None) -> dict:
+        """运行中切换采集来源（麦克风 <-> 电脑声音），不重载已加载的模型。"""
+        from mf_stream import switch_engine_capture
+
+        return switch_engine_capture(self, kind, device)
+
     def _run(self, on_partial, on_final, on_status) -> None:
         import numpy as np
-        from mf_stream import PcmInputStream
+        from mf_stream import SwitchablePcmStream
 
-        stream = PcmInputStream(self.audio_device, kind=self.capture_kind,
-                                sample_rate=SAMPLE_RATE, stop_event=self._stop)
+        stream = SwitchablePcmStream(self.audio_device, kind=self.capture_kind,
+                                     sample_rate=SAMPLE_RATE, stop_event=self._stop)
         self._capture = stream
         cache: dict = {}
         buffer = ""
@@ -226,6 +235,7 @@ class FunAsrEngine:
         voiced = False
         no_signal_reported = False
         block_seconds = BLOCK_SECONDS
+        capture_version = self._capture_version
 
         try:
             stream.start()
@@ -234,6 +244,20 @@ class FunAsrEngine:
                 audio16 = stream.read(READ_FRAMES)
                 if not audio16.size:
                     break
+
+                if self._capture_version != capture_version:
+                    # 采集来源刚换过：上一路残留的音频与已拼的句子都不能带过来
+                    capture_version = self._capture_version
+                    pending = np.zeros(0, dtype=np.float32)
+                    buffer = ""
+                    cache = {}
+                    voiced = False
+                    silent_seconds = 0.0
+                    elapsed = 0.0
+                    peak_rms = 0.0
+                    no_signal_reported = False
+                    on_partial("")
+                    on_status("running", CAPTURE_STATUS[self.capture_kind])
 
                 pending = (
                     np.concatenate([pending, audio16]) if pending.size else audio16

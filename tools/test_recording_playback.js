@@ -39,7 +39,7 @@ app.whenReady().then(async () => {
   try {
     win = new BrowserWindow({
       show: false,
-      webPreferences: { preload: path.join(ROOT, 'electron/preload-settings.js'), contextIsolation: true, nodeIntegration: false }
+      webPreferences: { preload: path.join(ROOT, 'out/preload/settings.js'), contextIsolation: true, nodeIntegration: false }
     })
     await win.loadURL('data:text/html,<html><body>recording playback regression</body></html>')
     for (const rate of [44100, 48000]) {

@@ -120,6 +120,89 @@ class TranscribeTests(unittest.TestCase):
         # 上传的是 PCM16 WAV，不是任意二进制
         self.assertIn(b"RIFF", body)
 
+    def test_multiple_models_keep_request_contract(self):
+        """下拉里的多种模型名都能原样进入请求体，不被本地白名单改写。"""
+        for model in ("whisper-1", "FunAudioLLM/SenseVoiceLarge", "whisper-large-v3"):
+            captured = {}
+
+            def fake_urlopen(request, timeout=None):
+                captured["body"] = request.data
+                return Response(b'{"text": "ok"}')
+
+            with mock.patch.object(api_engine.urllib.request, "urlopen", fake_urlopen):
+                text = self.engine(apiModel=model)._transcribe(silence(1600))
+
+            self.assertEqual(text, "ok")
+            self.assertIn(b'name="model"', captured["body"])
+            self.assertIn(model.encode("utf-8"), captured["body"])
+
+    def test_temperature_is_skipped_for_models_that_reject_it(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["body"] = request.data
+            return Response(b'{"text": "hi"}')
+
+        with mock.patch.object(api_engine.urllib.request, "urlopen", fake_urlopen):
+            text = self.engine(apiModel="gpt-4o-transcribe")._transcribe(silence(1600))
+
+        self.assertEqual(text, "hi")
+        body = captured["body"]
+        self.assertNotIn(b'name="temperature"', body)
+        # 其余字段照旧发送
+        self.assertIn(b'name="response_format"', body)
+        self.assertIn(b'name="language"', body)
+
+    def test_temperature_is_kept_for_whisper_models(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["body"] = request.data
+            return Response(b'{"text": "hi"}')
+
+        with mock.patch.object(api_engine.urllib.request, "urlopen", fake_urlopen):
+            self.engine(apiModel="whisper-1")._transcribe(silence(1600))
+
+        self.assertIn(b'name="temperature"', captured["body"])
+
+    def test_rejected_optional_field_is_dropped_and_retried(self):
+        """接口明确说不支持某字段时，去掉该字段重试一次，不把 400 直接抛给用户。"""
+        bodies = []
+
+        def fake_urlopen(request, timeout=None):
+            bodies.append(request.data)
+            if len(bodies) == 1:
+                raise api_engine.urllib.error.HTTPError(
+                    "https://api.test/v1/audio/transcriptions", 400, "bad", {},
+                    io.BytesIO(b'{"error": {"message": "Unrecognized field: temperature"}}'))
+            return Response(b'{"text": "retried"}')
+
+        with mock.patch.object(api_engine.urllib.request, "urlopen", fake_urlopen):
+            text = self.engine(apiPrompt="专有名词", apiLanguage="zh")._transcribe(silence(1600))
+
+        self.assertEqual(text, "retried")
+        self.assertEqual(len(bodies), 2)
+        self.assertIn(b'name="temperature"', bodies[0])
+        self.assertNotIn(b'name="temperature"', bodies[1])
+        # 只去掉被拒字段，其余可选字段保留
+        self.assertIn(b'name="prompt"', bodies[1])
+        self.assertIn(b'name="language"', bodies[1])
+
+    def test_unrelated_400_is_not_retried(self):
+        calls = []
+
+        def fake_urlopen(request, timeout=None):
+            calls.append(request.data)
+            raise api_engine.urllib.error.HTTPError(
+                "https://api.test/v1/audio/transcriptions", 400, "bad", {},
+                io.BytesIO(b'{"error": {"message": "invalid api key format"}}'))
+
+        with mock.patch.object(api_engine.urllib.request, "urlopen", fake_urlopen):
+            with self.assertRaisesRegex(RuntimeError, "接口返回错误"):
+                self.engine()._transcribe(silence(1600))
+
+        self.assertEqual(len(calls), 1)
+
     def test_missing_key_omits_authorization(self):
         captured = {}
 

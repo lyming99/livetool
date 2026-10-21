@@ -280,10 +280,11 @@ class EngineWiring(unittest.TestCase):
                 self.states = []
 
             def start(self):
-                self.stop.set()
+                # 不在 start 里置位：可切换流会在 start 后检查取消标记
                 return self
 
             def read(self, frames):
+                self.stop.set()
                 return np.empty(0, dtype=np.float32)
 
             def close(self):

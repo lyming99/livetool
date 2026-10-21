@@ -62,6 +62,9 @@ class WhisperEngine:
         self._thread: threading.Thread | None = None
         self._reader: threading.Thread | None = None
         self._audio_q: queue.Queue = queue.Queue(maxsize=200)
+        # 运行中切换采集来源：只换底层流，已加载的模型继续用
+        self._switch_lock = threading.Lock()
+        self._capture_version = 0
 
     # ---- 生命周期 ----
 
@@ -119,11 +122,17 @@ class WhisperEngine:
 
     # ---- 采集与识别 ----
 
-    def _read_loop(self, on_status) -> None:
-        from mf_stream import PcmInputStream
+    def switch_capture(self, kind: str, device=None) -> dict:
+        """运行中切换采集来源（麦克风 <-> 电脑声音），不重载已加载的模型。"""
+        from mf_stream import switch_engine_capture
 
-        stream = PcmInputStream(self.audio_device, kind=self.capture_kind,
-                                sample_rate=SAMPLE_RATE, stop_event=self._stop)
+        return switch_engine_capture(self, kind, device)
+
+    def _read_loop(self, on_status) -> None:
+        from mf_stream import SwitchablePcmStream
+
+        stream = SwitchablePcmStream(self.audio_device, kind=self.capture_kind,
+                                     sample_rate=SAMPLE_RATE, stop_event=self._stop)
         self._capture = stream
         try:
             stream.start()
@@ -159,11 +168,22 @@ class WhisperEngine:
         pending = np.zeros(0, dtype=np.float32)     # 当前整句，用于定稿
         silence = 0.0
         last_partial = 0.0
+        capture_version = self._capture_version
 
         window_samples = int(SAMPLE_RATE * PARTIAL_WINDOW)
         max_samples = int(SAMPLE_RATE * MAX_UTTERANCE)
 
         while not self._stop.is_set():
+            if self._capture_version != capture_version:
+                # 采集来源刚换过：上一路残留的音频不能拼进新来源的句子
+                capture_version = self._capture_version
+                buffer = np.zeros(0, dtype=np.float32)
+                pending = np.zeros(0, dtype=np.float32)
+                silence = 0.0
+                last_partial = 0.0
+                on_partial("")
+                on_status("running", CAPTURE_STATUS[self.capture_kind])
+
             try:
                 audio = self._audio_q.get(timeout=0.2)
             except queue.Empty:
