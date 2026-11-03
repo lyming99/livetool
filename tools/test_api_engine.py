@@ -373,6 +373,48 @@ class LoopTests(unittest.TestCase):
         self.assertTrue(self.wait_closed(source))
 
 
+class SilenceTests(unittest.TestCase):
+    """纯静音不应被当成一句话发去定稿（接口和本地 whisper 两个引擎都一样）。"""
+
+    def run_engine(self, module, engine, blocks):
+        source = ControlledPCM(engine._stop, blocks, hold=True)
+        calls, finals = [], []
+        engine._transcribe = lambda audio: (calls.append(len(audio)), "谢谢观看")[1]
+        with mock.patch.object(module, "PARTIAL_INTERVAL", 0.0), \
+                mock.patch("mf_stream.PcmInputStream", return_value=source):
+            thread = threading.Thread(
+                target=engine._run,
+                args=(lambda text: None, finals.append, lambda *args: None),
+                daemon=True,
+            )
+            thread.start()
+            time.sleep(1.0)
+            engine.stop()
+            thread.join(3)
+        return calls, finals
+
+    def engines(self):
+        import whisper_engine
+        cfg = {"apiBaseUrl": "https://api.test/v1", "captureSource": "input", "audioDevice": "mic-1"}
+        return [(api_engine, ApiEngine(cfg)), (whisper_engine, whisper_engine.WhisperEngine(cfg))]
+
+    def test_pure_silence_is_never_transcribed(self):
+        for module, engine in self.engines():
+            with self.subTest(engine=type(engine).__name__):
+                blocks = [np.zeros(1600, dtype=np.float32) for _ in range(30)]
+                calls, finals = self.run_engine(module, engine, blocks)
+                self.assertEqual(calls, [])
+                self.assertEqual(finals, [])
+
+    def test_speech_followed_by_silence_still_finalizes_once(self):
+        for module, engine in self.engines():
+            with self.subTest(engine=type(engine).__name__):
+                blocks = [np.full(1600, 0.25, dtype=np.float32) for _ in range(9)]
+                blocks += [np.zeros(1600, dtype=np.float32) for _ in range(30)]
+                calls, finals = self.run_engine(module, engine, blocks)
+                self.assertEqual(finals, ["谢谢观看"])
+
+
 class BackendWiring(unittest.TestCase):
     def test_backend_creates_api_engine(self):
         import main as backend_main

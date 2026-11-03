@@ -329,6 +329,7 @@ class ApiEngine:
         buffer = np.zeros(0, dtype=np.float32)      # 最近几秒，用于草稿
         pending = np.zeros(0, dtype=np.float32)     # 当前整句，用于定稿
         silence = 0.0
+        voiced = 0.0                                # pending 里真正有声音的时长
         last_partial = 0.0
         capture_version = self._capture_version
 
@@ -342,6 +343,7 @@ class ApiEngine:
                 buffer = np.zeros(0, dtype=np.float32)
                 pending = np.zeros(0, dtype=np.float32)
                 silence = 0.0
+                voiced = 0.0
                 last_partial = 0.0
                 mark_discontinuity(self.recorder)
                 on_partial("")
@@ -360,6 +362,7 @@ class ApiEngine:
 
             if rms >= SILENCE_RMS:
                 silence = 0.0
+                voiced += BLOCK_SAMPLES / SAMPLE_RATE
                 if now - last_partial >= PARTIAL_INTERVAL and len(buffer) > SAMPLE_RATE * 0.8:
                     last_partial = now
                     try:
@@ -371,15 +374,19 @@ class ApiEngine:
                         on_partial(text)
             else:
                 silence += BLOCK_SAMPLES / SAMPLE_RATE
-                if silence >= SILENCE_SECONDS and len(pending) >= SAMPLE_RATE * MIN_UTTERANCE:
-                    try:
-                        text = self._transcribe(pending)
-                    except Exception as exc:
-                        on_status("running", f"接口转写失败：{exc}")
-                        text = ""
-                    if text:
-                        on_final(text)
+                if silence >= SILENCE_SECONDS:
+                    # 只有真正说过话才定稿；纯静音直接丢掉，不发去转写
+                    if voiced >= MIN_UTTERANCE:
+                        try:
+                            text = self._transcribe(pending)
+                        except Exception as exc:
+                            on_status("running", f"接口转写失败：{exc}")
+                            text = ""
+                        if text:
+                            on_final(text)
+                    if voiced > 0:
+                        on_partial("")
                     pending = np.zeros(0, dtype=np.float32)
                     buffer = np.zeros(0, dtype=np.float32)
-                    on_partial("")
                     silence = 0.0
+                    voiced = 0.0
